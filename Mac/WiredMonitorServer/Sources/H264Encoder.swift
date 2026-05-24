@@ -46,7 +46,14 @@ class H264Encoder {
             bitRate = 30_000_000
         }
 
-        completeEveryFrame = ProcessInfo.processInfo.environment["WIRED_MONITOR_ASYNC_ENCODER"] != "1"
+        let env = ProcessInfo.processInfo.environment
+        if env["WIRED_MONITOR_ASYNC_ENCODER"] == "1" {
+            completeEveryFrame = false
+        } else if env["WIRED_MONITOR_SYNC_ENCODER"] == "1" {
+            completeEveryFrame = true
+        } else {
+            completeEveryFrame = false
+        }
     }
 
     func start() -> Bool {

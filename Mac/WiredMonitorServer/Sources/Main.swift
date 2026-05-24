@@ -125,6 +125,38 @@ struct WiredMonitorServer {
         var lastInputReportTime = Date()
         var lastInputReportFrame: UInt64 = 0
         var lastInputHash: UInt64 = 0
+        let pendingFrameLock = NSLock()
+        let encoderQueue = DispatchQueue(label: "com.wiredmonitor.h264-encoder", qos: .userInteractive)
+        var latestPixelBuffer: CVPixelBuffer?
+        var latestTimestamp: UInt64 = 0
+        var encoderScheduled = false
+
+        func scheduleEncoderIfNeeded() {
+            pendingFrameLock.lock()
+            if encoderScheduled {
+                pendingFrameLock.unlock()
+                return
+            }
+            encoderScheduled = true
+            pendingFrameLock.unlock()
+
+            encoderQueue.async {
+                while true {
+                    pendingFrameLock.lock()
+                    guard let pixelBuffer = latestPixelBuffer else {
+                        encoderScheduled = false
+                        pendingFrameLock.unlock()
+                        return
+                    }
+                    let timestamp = latestTimestamp
+                    latestPixelBuffer = nil
+                    pendingFrameLock.unlock()
+
+                    guard server.clientCount > 0 else { continue }
+                    encoder.encode(pixelBuffer: pixelBuffer, timestamp: timestamp)
+                }
+            }
+        }
 
         encoder.onNALUnit = { nalData, isKeyFrame, _, _ in
             frameCount += 1
@@ -162,7 +194,11 @@ struct WiredMonitorServer {
 
             inputFrameCount += 1
             let timestamp = UInt64(CFAbsoluteTimeGetCurrent() * 1000)
-            encoder.encode(pixelBuffer: pixelBuffer, timestamp: timestamp)
+            pendingFrameLock.lock()
+            latestPixelBuffer = pixelBuffer
+            latestTimestamp = timestamp
+            pendingFrameLock.unlock()
+            scheduleEncoderIfNeeded()
 
             let now = Date()
             if now.timeIntervalSince(lastInputReportTime) >= 1.0 {
