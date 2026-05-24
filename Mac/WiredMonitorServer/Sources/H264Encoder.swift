@@ -35,7 +35,7 @@ class H264Encoder {
            parsed > 0 {
             keyFrameInterval = parsed
         } else {
-            keyFrameInterval = 2
+            keyFrameInterval = 10
         }
 
         if let value = ProcessInfo.processInfo.environment["WIRED_MONITOR_BITRATE"],
@@ -43,7 +43,7 @@ class H264Encoder {
            parsed > 0 {
             bitRate = parsed
         } else {
-            bitRate = 50_000_000
+            bitRate = 30_000_000
         }
 
         completeEveryFrame = ProcessInfo.processInfo.environment["WIRED_MONITOR_ASYNC_ENCODER"] != "1"
@@ -101,11 +101,11 @@ class H264Encoder {
         if err != noErr { print("[编码器] 设置 BitRate 失败: \(err)") }
 
         // DataRateLimits: [bytes, seconds]
-        var dataRateLimits: [Int64] = [Int64((bitRate * 2) / 8), 1]
-        err = dataRateLimits.withUnsafeMutableBufferPointer { ptr in
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
-                                 value: NSData(bytes: ptr.baseAddress, length: 16))
-        }
+        let dataRateLimits = [
+            NSNumber(value: (bitRate * 2) / 8),
+            NSNumber(value: 1),
+        ] as CFArray
+        err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: dataRateLimits)
         if err != noErr { print("[编码器] 设置 DataRateLimits 失败: \(err)") }
 
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 0))

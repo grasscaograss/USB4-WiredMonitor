@@ -114,7 +114,7 @@ struct WiredMonitorServer {
             return parsed
         }
 
-        return 30
+        return 60
     }
 
     static func startH264Mode(capture: ScreenCapture, encoder: H264Encoder, server: FrameServer, width: Int, height: Int, fps: Int) {
@@ -129,7 +129,7 @@ struct WiredMonitorServer {
         encoder.onNALUnit = { nalData, isKeyFrame, _, _ in
             frameCount += 1
 
-            // 帧数据: [8字节 frameIndex] [8字节 timestamp] [1字节 isKeyFrame] [NAL data]
+            // 帧数据: [8字节 frameIndex] [8字节 timestamp] [1字节 isKeyFrame] [4字节 width] [4字节 height] [NAL data]
             var payload = Data()
             var idx = frameCount.littleEndian
             var ts = UInt64(CFAbsoluteTimeGetCurrent() * 1000).littleEndian
