@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -11,6 +12,9 @@ namespace WiredMonitorClient.Network;
 public class FrameReceiver
 {
     private const uint MaxPayloadLength = 128 * 1024 * 1024;
+    private const int SocketBufferSize = 4 * 1024 * 1024;
+    private const int LargePacketLogBytes = 256 * 1024;
+    private const double SlowPacketReadMs = 20.0;
 
     private TcpClient? _client;
     private NetworkStream? _stream;
@@ -34,7 +38,8 @@ public class FrameReceiver
             ? new TcpClient()
             : new TcpClient(address.AddressFamily);
         _client.NoDelay = true;
-        _client.ReceiveBufferSize = 64 * 1024;
+        _client.ReceiveBufferSize = SocketBufferSize;
+        _client.SendBufferSize = 256 * 1024;
 
         var connectTask = address == null
             ? _client.ConnectAsync(host, port)
@@ -43,7 +48,7 @@ public class FrameReceiver
 
         _stream = _client.GetStream();
         await SendHelloAsync(displayInfo, _cts.Token);
-        DiagLog.Write("TCP 连接成功");
+        DiagLog.Write($"TCP 连接成功: recvBuf={_client.ReceiveBufferSize}, sendBuf={_client.SendBufferSize}");
 
         OnConnectionChanged?.Invoke(this, true);
 
@@ -77,6 +82,7 @@ public class FrameReceiver
         var fpsCount = 0;
         var cursorCount = 0;
         var loggedFirstPacket = false;
+        var lastPacketReadLogTime = DateTime.MinValue;
 
         while (!ct.IsCancellationRequested && _stream != null)
         {
@@ -93,12 +99,23 @@ public class FrameReceiver
                 packetType = header.Type;
                 payloadLength = (int)header.PayloadLength;
                 dataBuf = dataBuf?.Length >= payloadLength ? dataBuf : new byte[payloadLength];
+                var payloadReadStart = Stopwatch.GetTimestamp();
                 await ReadExact(dataBuf, 0, payloadLength, ct);
+                var payloadReadMs = ElapsedMilliseconds(payloadReadStart);
 
                 if (!loggedFirstPacket)
                 {
                     DiagLog.Write($"首包: protocol=WM type={packetType} payloadLen={payloadLength}");
                     loggedFirstPacket = true;
+                }
+
+                var packetReadLogNow = DateTime.UtcNow;
+                if (packetType == PacketType.FrameH264 &&
+                    (payloadLength >= LargePacketLogBytes || payloadReadMs >= SlowPacketReadMs) &&
+                    (packetReadLogNow - lastPacketReadLogTime).TotalMilliseconds >= 500)
+                {
+                    DiagLog.Write($"网络读包: payload={payloadLength}, read={payloadReadMs:F1}ms");
+                    lastPacketReadLogTime = packetReadLogNow;
                 }
             }
             else
@@ -222,5 +239,10 @@ public class FrameReceiver
             if (n == 0) throw new IOException("连接已关闭");
             offset += n;
         }
+    }
+
+    private static double ElapsedMilliseconds(long startTimestamp)
+    {
+        return (Stopwatch.GetTimestamp() - startTimestamp) * 1000.0 / Stopwatch.Frequency;
     }
 }

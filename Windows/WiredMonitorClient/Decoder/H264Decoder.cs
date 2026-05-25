@@ -288,7 +288,7 @@ public unsafe class H264Decoder : IDisposable
 
                 while (ffmpeg.avcodec_receive_frame(_codecContext, _frame) == 0)
                 {
-                    if (_hardwareFrameLogged && ShouldOutputFrame?.Invoke() == false)
+                    if (ShouldOutputFrame?.Invoke() == false)
                     {
                         _skippedOutputFrames++;
                         ffmpeg.av_frame_unref(_frame);

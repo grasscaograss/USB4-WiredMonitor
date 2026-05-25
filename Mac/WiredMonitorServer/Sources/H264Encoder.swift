@@ -39,7 +39,7 @@ class H264Encoder {
            parsed > 0 {
             keyFrameInterval = parsed
         } else {
-            keyFrameInterval = 30
+            keyFrameInterval = UInt64(max(fps * 2, 60))
         }
 
         if let value = ProcessInfo.processInfo.environment["WIRED_MONITOR_BITRATE"],
@@ -47,7 +47,7 @@ class H264Encoder {
            parsed > 0 {
             bitRate = parsed
         } else {
-            bitRate = 10_000_000
+            bitRate = 12_000_000
         }
 
         let env = ProcessInfo.processInfo.environment
@@ -74,7 +74,7 @@ class H264Encoder {
            parsed <= 1 {
             quality = parsed
         } else {
-            quality = 0.45
+            quality = 0.50
         }
     }
 
@@ -148,6 +148,10 @@ class H264Encoder {
 
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: keyFrameInterval))
         if err != noErr { print("[编码器] 设置 MaxKeyFrameInterval 失败: \(err)") }
+
+        let keyFrameIntervalDuration = Double(keyFrameInterval) / Double(max(fps, 1))
+        err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: NSNumber(value: keyFrameIntervalDuration))
+        if err != noErr { print("[编码器] 设置 MaxKeyFrameIntervalDuration 失败: \(err)") }
 
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_Quality, value: NSNumber(value: quality))
         if err != noErr { print("[编码器] 设置 Quality 失败: \(err)") }
