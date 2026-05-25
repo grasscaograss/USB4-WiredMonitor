@@ -47,7 +47,7 @@ class H264Encoder {
            parsed > 0 {
             bitRate = parsed
         } else {
-            bitRate = 12_000_000
+            bitRate = 18_000_000
         }
 
         let env = ProcessInfo.processInfo.environment
@@ -74,7 +74,7 @@ class H264Encoder {
            parsed <= 1 {
             quality = parsed
         } else {
-            quality = 0.50
+            quality = 0.60
         }
     }
 
@@ -123,7 +123,8 @@ class H264Encoder {
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         if err != noErr { print("[编码器] 设置 RealTime 失败: \(err)") }
 
-        err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel as AnyObject)
+        let profile = Self.profileLevel()
+        err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: profile.value as AnyObject)
         if err != noErr { print("[编码器] 设置 ProfileLevel 失败: \(err)") }
 
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitRate))
@@ -163,8 +164,20 @@ class H264Encoder {
         }
 
         self.session = session
-        print("[编码器] H.264 编码器已启动 (\(width)x\(height) @ \(fps)fps), 码率: \(Double(bitRate) / 1_000_000.0) Mbps, 关键帧间隔: \(keyFrameInterval), sync=\(completeEveryFrame), flushInterval=\(completeFrameInterval), quality=\(quality)")
+        print("[编码器] H.264 编码器已启动 (\(width)x\(height) @ \(fps)fps), 码率: \(Double(bitRate) / 1_000_000.0) Mbps, 关键帧间隔: \(keyFrameInterval), sync=\(completeEveryFrame), flushInterval=\(completeFrameInterval), quality=\(quality), profile=\(profile.name)")
         return true
+    }
+
+    private static func profileLevel() -> (name: String, value: CFString) {
+        let profile = ProcessInfo.processInfo.environment["WIRED_MONITOR_H264_PROFILE"]?.lowercased()
+        switch profile {
+        case "baseline":
+            return ("baseline", kVTProfileLevel_H264_Baseline_AutoLevel)
+        case "main":
+            return ("main", kVTProfileLevel_H264_Main_AutoLevel)
+        default:
+            return ("high", kVTProfileLevel_H264_High_AutoLevel)
+        }
     }
 
     func encode(pixelBuffer: CVPixelBuffer, timestamp: UInt64) {
