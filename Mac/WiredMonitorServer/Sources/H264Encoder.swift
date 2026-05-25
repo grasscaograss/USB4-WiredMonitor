@@ -47,7 +47,7 @@ class H264Encoder {
            parsed > 0 {
             bitRate = parsed
         } else {
-            bitRate = 18_000_000
+            bitRate = 30_000_000
         }
 
         let env = ProcessInfo.processInfo.environment
@@ -74,7 +74,7 @@ class H264Encoder {
            parsed <= 1 {
             quality = parsed
         } else {
-            quality = 0.60
+            quality = 0.72
         }
     }
 
