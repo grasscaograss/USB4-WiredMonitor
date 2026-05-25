@@ -322,7 +322,7 @@ public partial class MainWindow : Window
                 }
             }
         }
-        else if (queuedFrames >= EmergencyQueuedH264Frames)
+        else if (queuedFrames >= EmergencyQueuedH264Frames && queueLatencyMs > ResumeQueueLatencyMs)
         {
             DiagLog.Write($"H264 解码落后，清空到下一关键帧 queued={queuedFrames}, lag={queueLatencyMs}ms, currentKey={frame.IsKeyFrame}, idx={frame.FrameIndex}");
             _lastCatchUpTime = now;

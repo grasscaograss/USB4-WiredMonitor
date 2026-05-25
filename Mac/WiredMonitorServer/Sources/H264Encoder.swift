@@ -39,7 +39,7 @@ class H264Encoder {
            parsed > 0 {
             keyFrameInterval = parsed
         } else {
-            keyFrameInterval = UInt64(max(fps * 2, 60))
+            keyFrameInterval = UInt64(max(fps * 4, 120))
         }
 
         if let value = ProcessInfo.processInfo.environment["WIRED_MONITOR_BITRATE"],
@@ -47,7 +47,7 @@ class H264Encoder {
            parsed > 0 {
             bitRate = parsed
         } else {
-            bitRate = 30_000_000
+            bitRate = 60_000_000
         }
 
         let env = ProcessInfo.processInfo.environment
@@ -74,7 +74,7 @@ class H264Encoder {
            parsed <= 1 {
             quality = parsed
         } else {
-            quality = 0.72
+            quality = 0.88
         }
     }
 
