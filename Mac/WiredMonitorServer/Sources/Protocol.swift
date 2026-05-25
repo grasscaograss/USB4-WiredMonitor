@@ -12,6 +12,7 @@ enum PacketType: UInt16 {
     case frameRaw = 0x0031
     case inputEvent = 0x0040
     case stats = 0x0050
+    case cursorPosition = 0x0060
 }
 
 let ProtocolMagic: UInt16 = 0x574D  // "WM"
@@ -27,7 +28,7 @@ func videoDimensionAlignment() -> Int {
         return parsed
     }
 
-    return 16
+    return 2
 }
 
 func alignVideoDimension(_ value: Int) -> Int {
@@ -41,8 +42,10 @@ struct PacketHeader {
     let type: PacketType
     let payloadLength: UInt32
 
+    static let size = 10
+
     func encode() -> Data {
-        var data = Data(capacity: 10)
+        var data = Data(capacity: PacketHeader.size)
         var m = ProtocolMagic.littleEndian
         var v = ProtocolVersion.littleEndian
         var t = type.rawValue.littleEndian
@@ -54,4 +57,25 @@ struct PacketHeader {
         data.append(Data(bytes: &p, count: 4))
         return data
     }
+
+    static func decode(_ data: Data) -> PacketHeader? {
+        guard data.count >= PacketHeader.size else { return nil }
+        guard readUInt16(data, offset: 0) == ProtocolMagic else { return nil }
+        guard readUInt16(data, offset: 2) == ProtocolVersion else { return nil }
+        guard let packetType = PacketType(rawValue: readUInt16(data, offset: 4)) else { return nil }
+        let payloadLength = readUInt32(data, offset: 6)
+        return PacketHeader(type: packetType, payloadLength: payloadLength)
+    }
+}
+
+func readUInt32(_ data: Data, offset: Int) -> UInt32 {
+    UInt32(data[offset]) |
+        (UInt32(data[offset + 1]) << 8) |
+        (UInt32(data[offset + 2]) << 16) |
+        (UInt32(data[offset + 3]) << 24)
+}
+
+private func readUInt16(_ data: Data, offset: Int) -> UInt16 {
+    UInt16(data[offset]) |
+        (UInt16(data[offset + 1]) << 8)
 }

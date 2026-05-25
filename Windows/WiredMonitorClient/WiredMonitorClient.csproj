@@ -8,6 +8,7 @@
     <UseWPF>true</UseWPF>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon />
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <StartupObject>WiredMonitorClient.App</StartupObject>
   </PropertyGroup>
 

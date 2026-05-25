@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using FFmpeg.AutoGen;
@@ -8,6 +10,8 @@ namespace WiredMonitorClient.Decoder;
 
 public unsafe class H264Decoder : IDisposable
 {
+    private const int SwsFastBilinear = 1;
+
     private readonly ILogger _logger;
     private readonly AVCodecContext_get_format _getFormatCallback;
     private AVCodecContext* _codecContext;
@@ -16,7 +20,6 @@ public unsafe class H264Decoder : IDisposable
     private AVFrame* _hwTransferFrame;
     private AVPacket* _packet;
     private SwsContext* _swsContext;
-    private byte* _convBuffer;
     private int _convBufferSize;
     private int _swsWidth;
     private int _swsHeight;
@@ -31,6 +34,10 @@ public unsafe class H264Decoder : IDisposable
     private bool _unexpectedSoftwareFrameLogged;
     private DateTime _lastDecodedHashTime = DateTime.MinValue;
     private ulong _lastDecodedHash;
+    private readonly bool _decodedHashDiagnostics = Environment.GetEnvironmentVariable("WIRED_MONITOR_DIAG_HASH") == "1";
+    private DateTime _lastDecodeWorkReportTime = DateTime.UtcNow;
+    private long _decodeWorkTicks;
+    private int _decodeWorkFrames;
 
     public event EventHandler<DecodedFrame>? OnFrameDecoded;
 
@@ -279,23 +286,40 @@ public unsafe class H264Decoder : IDisposable
 
                 while (ffmpeg.avcodec_receive_frame(_codecContext, _frame) == 0)
                 {
-                    var bgraData = ConvertFrameToBGRA(_frame);
-                    if (bgraData != null)
+                    var decodeWorkStart = Stopwatch.GetTimestamp();
+                    var bgraFrame = ConvertFrameToBGRA(_frame);
+                    if (bgraFrame != null)
                     {
-                        var now = DateTime.UtcNow;
-                        if ((now - _lastDecodedHashTime).TotalSeconds >= 1.0)
+                        RecordDecodeWork(decodeWorkStart);
+
+                        if (_decodedHashDiagnostics)
                         {
-                            var hash = SampleHash(bgraData, _frame->width, _frame->height, _frame->width * 4);
-                            DiagLog.Write($"硬解输出帧: {_frame->width}x{_frame->height}, bytes={bgraData.Length}, hash={hash:x}, changed={hash != _lastDecodedHash}");
-                            _lastDecodedHash = hash;
-                            _lastDecodedHashTime = now;
+                            var now = DateTime.UtcNow;
+                            if ((now - _lastDecodedHashTime).TotalSeconds >= 1.0)
+                            {
+                                var hash = SampleHash(bgraFrame.Value.Buffer, _frame->width, _frame->height, _frame->width * 4);
+                                DiagLog.Write($"硬解输出帧: {_frame->width}x{_frame->height}, bytes={bgraFrame.Value.Length}, hash={hash:x}, changed={hash != _lastDecodedHash}");
+                                _lastDecodedHash = hash;
+                                _lastDecodedHashTime = now;
+                            }
                         }
-                        OnFrameDecoded?.Invoke(this, new DecodedFrame
+
+                        var handler = OnFrameDecoded;
+                        if (handler == null)
                         {
-                            Width = _frame->width,
-                            Height = _frame->height,
-                            PixelData = bgraData
-                        });
+                            bgraFrame.Value.ReturnBuffer(bgraFrame.Value.Buffer);
+                        }
+                        else
+                        {
+                            handler.Invoke(this, new DecodedFrame
+                            {
+                                Width = _frame->width,
+                                Height = _frame->height,
+                                PixelData = bgraFrame.Value.Buffer,
+                                PixelDataLength = bgraFrame.Value.Length,
+                                ReturnBuffer = bgraFrame.Value.ReturnBuffer,
+                            });
+                        }
                     }
 
                     ffmpeg.av_frame_unref(_frame);
@@ -313,7 +337,7 @@ public unsafe class H264Decoder : IDisposable
         }
     }
 
-    private byte[]? ConvertFrameToBGRA(AVFrame* frame)
+    private BgraFrameBuffer? ConvertFrameToBGRA(AVFrame* frame)
     {
         if (frame->format != (int)_hwPixelFormat)
         {
@@ -378,7 +402,7 @@ public unsafe class H264Decoder : IDisposable
         return _hwTransferFrame;
     }
 
-    private byte[]? ConvertSoftwareFrameToBGRA(AVFrame* frame)
+    private BgraFrameBuffer? ConvertSoftwareFrameToBGRA(AVFrame* frame)
     {
         int width = frame->width;
         int height = frame->height;
@@ -395,7 +419,7 @@ public unsafe class H264Decoder : IDisposable
             _swsContext = ffmpeg.sws_getContext(
                 width, height, sourceFormat,
                 width, height, AVPixelFormat.AV_PIX_FMT_BGRA,
-                0, null, null, null);
+                SwsFastBilinear, null, null, null);
 
             if (_swsContext == null)
             {
@@ -404,19 +428,12 @@ public unsafe class H264Decoder : IDisposable
                 return null;
             }
 
-            if (_convBuffer != null)
-            {
-                ffmpeg.av_free(_convBuffer);
-                _convBuffer = null;
-            }
-
             _convBufferSize = ffmpeg.av_image_get_buffer_size(AVPixelFormat.AV_PIX_FMT_BGRA, width, height, 1);
-            _convBuffer = (byte*)ffmpeg.av_malloc((ulong)_convBufferSize);
             _swsWidth = width;
             _swsHeight = height;
             _swsSourceFormat = sourceFormat;
 
-            if (_convBuffer == null)
+            if (_convBufferSize <= 0)
             {
                 _logger.LogError("无法分配 BGRA 转换缓冲区: {Size}", _convBufferSize);
                 DiagLog.Write($"无法分配 BGRA 转换缓冲区: {_convBufferSize}");
@@ -424,28 +441,57 @@ public unsafe class H264Decoder : IDisposable
             }
         }
 
-        byte_ptrArray4 dstData = new();
-        int_array4 dstLinesize = new();
-        ffmpeg.av_image_fill_linesizes(ref dstLinesize, AVPixelFormat.AV_PIX_FMT_BGRA, width);
-        dstData[0] = _convBuffer;
-        dstData[1] = null;
-        dstData[2] = null;
-        dstData[3] = null;
-
-        var scaledRows = ffmpeg.sws_scale(_swsContext,
-            frame->data, frame->linesize, 0, height,
-            dstData, dstLinesize);
-
-        if (scaledRows <= 0)
+        var result = ArrayPool<byte>.Shared.Rent(_convBufferSize);
+        try
         {
-            _logger.LogWarning("硬解帧转换 BGRA 失败: {Rows}", scaledRows);
-            DiagLog.Write($"硬解帧转换 BGRA 失败: {scaledRows}");
-            return null;
-        }
+            fixed (byte* dst = result)
+            {
+                byte_ptrArray4 dstData = new();
+                int_array4 dstLinesize = new();
+                ffmpeg.av_image_fill_linesizes(ref dstLinesize, AVPixelFormat.AV_PIX_FMT_BGRA, width);
+                dstData[0] = dst;
+                dstData[1] = null;
+                dstData[2] = null;
+                dstData[3] = null;
 
-        var result = new byte[_convBufferSize];
-        Marshal.Copy((IntPtr)_convBuffer, result, 0, _convBufferSize);
-        return result;
+                var scaledRows = ffmpeg.sws_scale(_swsContext,
+                    frame->data, frame->linesize, 0, height,
+                    dstData, dstLinesize);
+
+                if (scaledRows <= 0)
+                {
+                    _logger.LogWarning("硬解帧转换 BGRA 失败: {Rows}", scaledRows);
+                    DiagLog.Write($"硬解帧转换 BGRA 失败: {scaledRows}");
+                    ArrayPool<byte>.Shared.Return(result);
+                    return null;
+                }
+            }
+
+            return new BgraFrameBuffer(result, _convBufferSize, buffer => ArrayPool<byte>.Shared.Return(buffer));
+        }
+        catch
+        {
+            ArrayPool<byte>.Shared.Return(result);
+            throw;
+        }
+    }
+
+    private readonly record struct BgraFrameBuffer(byte[] Buffer, int Length, Action<byte[]> ReturnBuffer);
+
+    private void RecordDecodeWork(long startTimestamp)
+    {
+        _decodeWorkTicks += Stopwatch.GetTimestamp() - startTimestamp;
+        _decodeWorkFrames++;
+
+        var now = DateTime.UtcNow;
+        if ((now - _lastDecodeWorkReportTime).TotalSeconds < 2.0)
+            return;
+
+        var avgMs = _decodeWorkTicks * 1000.0 / Stopwatch.Frequency / Math.Max(1, _decodeWorkFrames);
+        DiagLog.Write($"H264解码处理: frames={_decodeWorkFrames}, avg={avgMs:F1}ms");
+        _decodeWorkTicks = 0;
+        _decodeWorkFrames = 0;
+        _lastDecodeWorkReportTime = now;
     }
 
     private static string ErrorToString(int error)
@@ -488,11 +534,6 @@ public unsafe class H264Decoder : IDisposable
 
     public void Dispose()
     {
-        if (_convBuffer != null)
-        {
-            ffmpeg.av_free(_convBuffer);
-            _convBuffer = null;
-        }
         if (_swsContext != null)
         {
             ffmpeg.sws_freeContext(_swsContext);
@@ -540,4 +581,6 @@ public readonly struct DecodedFrame
     public int Width { get; init; }
     public int Height { get; init; }
     public byte[] PixelData { get; init; }
+    public int PixelDataLength { get; init; }
+    public Action<byte[]>? ReturnBuffer { get; init; }
 }

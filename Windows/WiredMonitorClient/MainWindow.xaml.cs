@@ -1,9 +1,12 @@
 using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
 using Microsoft.Extensions.Logging;
 using WiredMonitorClient.Decoder;
 using WiredMonitorClient.Diagnostics;
+using WiredMonitorClient.Display;
 using WiredMonitorClient.Network;
 using WiredMonitorClient.Protocol;
 using WiredMonitorClient.Rendering;
@@ -12,7 +15,12 @@ namespace WiredMonitorClient;
 
 public partial class MainWindow : Window
 {
-    private const int MaxQueuedH264Frames = 2;
+    private const int ReceiveBackpressureHighWatermark = 1;
+    private const int ReceiveBackpressureLowWatermark = 0;
+    private const int MaxReceiveBackpressureSleepMs = 40;
+    private const int EmergencyQueuedH264Frames = 90;
+    private const int MaxQueueLatencyMs = 800;
+    private const long MacAbsoluteEpochOffsetMs = 978_307_200_000;
 
     private readonly ILogger _logger;
     private readonly FrameReceiver _receiver;
@@ -26,6 +34,7 @@ public partial class MainWindow : Window
     private int _queuedH264Frames;
     private volatile bool _dropUntilKeyFrame;
     private volatile bool _resetDecoderOnNextKeyFrame;
+    private DateTime _lastCatchUpTime = DateTime.MinValue;
 
     private int _frameCount;
     private long _totalBytes;
@@ -37,7 +46,14 @@ public partial class MainWindow : Window
     private bool _hasDecodedFrame;
     private DateTime _lastReceiveStatusUpdate = DateTime.MinValue;
     private string? _lastReceiveError;
+    private long _minObservedMacClockOffsetMs = long.MaxValue;
+    private DateTime _lastLatencyLogTime = DateTime.MinValue;
+    private DateTime _lastBackpressureLogTime = DateTime.MinValue;
     private int _renderedFrameCount;
+    private bool _isFullscreen;
+    private WindowState _previousWindowState = WindowState.Normal;
+    private WindowStyle _previousWindowStyle = WindowStyle.SingleBorderWindow;
+    private ResizeMode _previousResizeMode = ResizeMode.CanResize;
 
     public MainWindow()
     {
@@ -56,6 +72,7 @@ public partial class MainWindow : Window
 
         _receiver.OnH264Frame += OnH264Frame;
         _receiver.OnRawFrame += OnRawFrame;
+        _receiver.OnCursorPosition += OnCursorPosition;
         _receiver.OnConnectionChanged += OnConnectionChanged;
         _receiver.OnReceiveError += OnReceiveError;
 
@@ -74,7 +91,9 @@ public partial class MainWindow : Window
 
         try
         {
-            await _receiver.ConnectAsync(host, port);
+            var displayInfo = WindowsDisplayInfo.FromWindow(this);
+            DiagLog.Write($"连接使用显示器信息: {displayInfo.Width}x{displayInfo.Height}@{displayInfo.RefreshRate}, dpi={displayInfo.Dpi}");
+            await _receiver.ConnectAsync(host, port, displayInfo);
             Console.WriteLine("[UI] ConnectAsync 返回成功");
         }
         catch (Exception ex)
@@ -94,17 +113,48 @@ public partial class MainWindow : Window
 
     private void FullscreenButton_Click(object sender, RoutedEventArgs e)
     {
-        if (WindowStyle == WindowStyle.None)
+        ToggleFullscreen();
+    }
+
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.F11)
         {
-            WindowStyle = WindowStyle.SingleBorderWindow;
-            WindowState = WindowState.Normal;
+            ToggleFullscreen();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape && _isFullscreen)
+        {
+            ToggleFullscreen();
+            e.Handled = true;
+        }
+    }
+
+    private void ToggleFullscreen()
+    {
+        if (_isFullscreen)
+        {
+            TopToolbar.Visibility = Visibility.Visible;
+            BottomStatusBar.Visibility = Visibility.Visible;
+            WindowStyle = _previousWindowStyle;
+            ResizeMode = _previousResizeMode;
+            WindowState = _previousWindowState;
             FullscreenButton.Content = "全屏";
+            _isFullscreen = false;
         }
         else
         {
+            _previousWindowState = WindowState;
+            _previousWindowStyle = WindowStyle;
+            _previousResizeMode = ResizeMode;
+            TopToolbar.Visibility = Visibility.Collapsed;
+            BottomStatusBar.Visibility = Visibility.Collapsed;
+            WindowState = WindowState.Normal;
             WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
             WindowState = WindowState.Maximized;
             FullscreenButton.Content = "退出全屏";
+            _isFullscreen = true;
         }
     }
 
@@ -132,12 +182,17 @@ public partial class MainWindow : Window
                 ClearH264Queue();
                 _dropUntilKeyFrame = false;
                 _resetDecoderOnNextKeyFrame = false;
+                _lastCatchUpTime = DateTime.MinValue;
+                _minObservedMacClockOffsetMs = long.MaxValue;
+                _lastLatencyLogTime = DateTime.MinValue;
+                _lastBackpressureLogTime = DateTime.MinValue;
                 _decodeCts?.Cancel();
                 _decodeCts = new CancellationTokenSource();
                 _decodeTask = Task.Run(() => DecodeLoop(_decodeCts.Token));
                 _lastReceiveStatusUpdate = DateTime.MinValue;
                 _lastReceiveError = null;
                 StatusText.Visibility = Visibility.Visible;
+                RemoteCursor.Visibility = Visibility.Collapsed;
             }
             else
             {
@@ -148,6 +203,7 @@ public partial class MainWindow : Window
                     : $"接收中断: {_lastReceiveError}";
                 StatusText.Visibility = Visibility.Visible;
                 DisplayImage.Source = null;
+                RemoteCursor.Visibility = Visibility.Collapsed;
                 ConnectButton.IsEnabled = true;
                 DisconnectButton.IsEnabled = false;
                 FpsText.Text = "";
@@ -194,9 +250,17 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (Volatile.Read(ref _queuedH264Frames) >= MaxQueuedH264Frames)
+        var queuedFrames = Volatile.Read(ref _queuedH264Frames);
+        var queueLatencyMs = EstimateQueueLatencyMs(frame);
+        if ((now - _lastLatencyLogTime).TotalSeconds >= 2.0)
         {
-            DiagLog.Write($"H264 解码队列积压，丢弃旧帧 queued={_queuedH264Frames}, currentKey={frame.IsKeyFrame}");
+            _lastLatencyLogTime = now;
+            DiagLog.Write($"H264低延迟状态: queue={queuedFrames}, lag={queueLatencyMs}ms, key={frame.IsKeyFrame}, idx={frame.FrameIndex}");
+        }
+
+        if (queuedFrames >= EmergencyQueuedH264Frames)
+        {
+            DiagLog.Write($"H264 解码落后，清空到下一关键帧 queued={queuedFrames}, lag={queueLatencyMs}ms, currentKey={frame.IsKeyFrame}");
             ClearH264Queue();
             _resetDecoderOnNextKeyFrame = true;
 
@@ -205,6 +269,23 @@ public partial class MainWindow : Window
                 _dropUntilKeyFrame = true;
                 return;
             }
+        }
+        else if (queueLatencyMs > MaxQueueLatencyMs && (now - _lastCatchUpTime).TotalSeconds >= 2.0)
+        {
+            DiagLog.Write($"H264 延迟过高，快速追帧到下一关键帧 queued={queuedFrames}, lag={queueLatencyMs}ms, currentKey={frame.IsKeyFrame}, idx={frame.FrameIndex}");
+            _lastCatchUpTime = now;
+            ClearH264Queue();
+            _resetDecoderOnNextKeyFrame = true;
+
+            if (!frame.IsKeyFrame)
+            {
+                _dropUntilKeyFrame = true;
+                return;
+            }
+        }
+        else if (queueLatencyMs > MaxQueueLatencyMs && (now - _lastLatencyLogTime).TotalSeconds >= 0.5)
+        {
+            DiagLog.Write($"H264延迟偏高但等待追帧冷却: queue={queuedFrames}, lag={queueLatencyMs}ms, idx={frame.FrameIndex}");
         }
 
         if (_dropUntilKeyFrame)
@@ -223,6 +304,42 @@ public partial class MainWindow : Window
         _h264Queue.Enqueue(frame);
         Interlocked.Increment(ref _queuedH264Frames);
         _h264Signal.Release();
+        ApplyReceiveBackpressureIfNeeded();
+    }
+
+    private void ApplyReceiveBackpressureIfNeeded()
+    {
+        if (Volatile.Read(ref _queuedH264Frames) < ReceiveBackpressureHighWatermark)
+            return;
+
+        var sleepMs = 0;
+        var sw = Stopwatch.StartNew();
+        while (Volatile.Read(ref _queuedH264Frames) > ReceiveBackpressureLowWatermark &&
+               sw.ElapsedMilliseconds < MaxReceiveBackpressureSleepMs)
+        {
+            Thread.Sleep(1);
+            sleepMs++;
+        }
+
+        var now = DateTime.UtcNow;
+        if ((now - _lastBackpressureLogTime).TotalSeconds >= 2.0)
+        {
+            _lastBackpressureLogTime = now;
+            DiagLog.Write($"接收背压: slept={sleepMs}ms, queue={Volatile.Read(ref _queuedH264Frames)}");
+        }
+    }
+
+    private long EstimateQueueLatencyMs(FramePayload frame)
+    {
+        if (frame.Timestamp == 0)
+            return 0;
+
+        var localMacEpochMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - MacAbsoluteEpochOffsetMs;
+        var observedOffset = localMacEpochMs - unchecked((long)frame.Timestamp);
+        if (observedOffset < _minObservedMacClockOffsetMs)
+            _minObservedMacClockOffsetMs = observedOffset;
+
+        return Math.Max(0, observedOffset - _minObservedMacClockOffsetMs);
     }
 
     private async Task DecodeLoop(CancellationToken ct)
@@ -240,7 +357,9 @@ public partial class MainWindow : Window
 
             while (_h264Queue.TryDequeue(out var frame))
             {
-                Interlocked.Decrement(ref _queuedH264Frames);
+                if (Interlocked.Decrement(ref _queuedH264Frames) < 0)
+                    Interlocked.Exchange(ref _queuedH264Frames, 0);
+
                 DecodeH264Frame(frame);
             }
         }
@@ -354,6 +473,8 @@ public partial class MainWindow : Window
             Width = decodedFrame.Width,
             Height = decodedFrame.Height,
             PixelData = decodedFrame.PixelData,
+            PixelDataLength = decodedFrame.PixelDataLength,
+            ReturnBuffer = decodedFrame.ReturnBuffer,
         });
     }
 
@@ -413,6 +534,38 @@ public partial class MainWindow : Window
         }
 
         _renderer.RenderRawFrame(frame);
+    }
+
+    private void OnCursorPosition(object? sender, CursorPositionPayload cursor)
+    {
+        Dispatcher.Invoke(() => UpdateRemoteCursor(cursor));
+    }
+
+    private void UpdateRemoteCursor(CursorPositionPayload cursor)
+    {
+        if (!cursor.Visible || _displayWidth <= 0 || _displayHeight <= 0)
+        {
+            RemoteCursor.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var hostWidth = DisplayHost.ActualWidth;
+        var hostHeight = DisplayHost.ActualHeight;
+        if (hostWidth <= 0 || hostHeight <= 0)
+        {
+            RemoteCursor.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var scale = Math.Min(hostWidth / _displayWidth, hostHeight / _displayHeight);
+        var renderedWidth = _displayWidth * scale;
+        var renderedHeight = _displayHeight * scale;
+        var offsetX = (hostWidth - renderedWidth) / 2.0;
+        var offsetY = (hostHeight - renderedHeight) / 2.0;
+
+        Canvas.SetLeft(RemoteCursor, offsetX + cursor.X * scale);
+        Canvas.SetTop(RemoteCursor, offsetY + cursor.Y * scale);
+        RemoteCursor.Visibility = Visibility.Visible;
     }
 
     private void OnReceiveError(object? sender, string message)

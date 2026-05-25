@@ -23,6 +23,10 @@ class H264Encoder {
     private let keyFrameInterval: UInt64
     private let bitRate: Int
     private let completeEveryFrame: Bool
+    private let completeFrameInterval: UInt64
+    private let quality: Double
+    private let timestampLock = NSLock()
+    private var frameTimestamps: [Int64: UInt64] = [:]
 
     var onNALUnit: ((Data, Bool, UInt64, UInt64) -> Void)?
 
@@ -35,7 +39,7 @@ class H264Encoder {
            parsed > 0 {
             keyFrameInterval = parsed
         } else {
-            keyFrameInterval = 10
+            keyFrameInterval = 30
         }
 
         if let value = ProcessInfo.processInfo.environment["WIRED_MONITOR_BITRATE"],
@@ -43,7 +47,7 @@ class H264Encoder {
            parsed > 0 {
             bitRate = parsed
         } else {
-            bitRate = 30_000_000
+            bitRate = 10_000_000
         }
 
         let env = ProcessInfo.processInfo.environment
@@ -53,6 +57,24 @@ class H264Encoder {
             completeEveryFrame = true
         } else {
             completeEveryFrame = false
+        }
+
+        if let value = env["WIRED_MONITOR_FLUSH_INTERVAL"],
+           let parsed = UInt64(value),
+           parsed > 0,
+           parsed <= 120 {
+            completeFrameInterval = parsed
+        } else {
+            completeFrameInterval = 1
+        }
+
+        if let value = env["WIRED_MONITOR_QUALITY"],
+           let parsed = Double(value),
+           parsed > 0,
+           parsed <= 1 {
+            quality = parsed
+        } else {
+            quality = 0.45
         }
     }
 
@@ -127,6 +149,9 @@ class H264Encoder {
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: keyFrameInterval))
         if err != noErr { print("[编码器] 设置 MaxKeyFrameInterval 失败: \(err)") }
 
+        err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_Quality, value: NSNumber(value: quality))
+        if err != noErr { print("[编码器] 设置 Quality 失败: \(err)") }
+
         err = VTCompressionSessionPrepareToEncodeFrames(session)
         guard err == noErr else {
             print("[编码器] 准备失败: \(err)")
@@ -134,7 +159,7 @@ class H264Encoder {
         }
 
         self.session = session
-        print("[编码器] H.264 编码器已启动 (\(width)x\(height) @ \(fps)fps), 码率: \(Double(bitRate) / 1_000_000.0) Mbps, 关键帧间隔: \(keyFrameInterval), sync=\(completeEveryFrame)")
+        print("[编码器] H.264 编码器已启动 (\(width)x\(height) @ \(fps)fps), 码率: \(Double(bitRate) / 1_000_000.0) Mbps, 关键帧间隔: \(keyFrameInterval), sync=\(completeEveryFrame), flushInterval=\(completeFrameInterval), quality=\(quality)")
         return true
     }
 
@@ -150,6 +175,9 @@ class H264Encoder {
 
         let presentationTime = CMTime(value: Int64(frameIndex), timescale: CMTimeScale(fps))
         frameIndex += 1
+        timestampLock.lock()
+        frameTimestamps[presentationTime.value] = timestamp
+        timestampLock.unlock()
 
         let isKeyFrame = needsKeyFrame || frameIndex % keyFrameInterval == 0
         needsKeyFrame = false
@@ -169,10 +197,13 @@ class H264Encoder {
 
         if status != noErr {
             print("[编码器] EncodeFrame 失败: \(status)")
+            timestampLock.lock()
+            frameTimestamps.removeValue(forKey: presentationTime.value)
+            timestampLock.unlock()
         }
 
         // 低延迟模式下不让 VideoToolbox 内部积压输入帧；宁可降低 FPS，也不要输出旧画面。
-        if completeEveryFrame || encodeInputCount <= 3 || isKeyFrame {
+        if completeEveryFrame || encodeInputCount <= 3 || isKeyFrame || frameIndex % completeFrameInterval == 0 {
             VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: presentationTime)
         }
     }
@@ -182,6 +213,9 @@ class H264Encoder {
             VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
         }
         session = nil
+        timestampLock.lock()
+        frameTimestamps.removeAll()
+        timestampLock.unlock()
         print("[编码器] 已停止")
     }
 
@@ -214,12 +248,21 @@ class H264Encoder {
         }
         nalData.append(sliceData)
 
-        let timestamp = UInt64(CFAbsoluteTimeGetCurrent() * 1000)
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let timestamp = takeFrameTimestamp(presentationTime: presentationTime)
         encodeOutputCount += 1
         if encodeOutputCount <= 3 || isKeyFrame {
             print("[编码器] 输出帧 #\(encodeOutputCount), key=\(isKeyFrame), bytes=\(nalData.count)")
         }
         onNALUnit?(nalData, isKeyFrame, frameIndex, timestamp)
+    }
+
+    private func takeFrameTimestamp(presentationTime: CMTime) -> UInt64 {
+        timestampLock.lock()
+        let timestamp = frameTimestamps.removeValue(forKey: presentationTime.value)
+        timestampLock.unlock()
+
+        return timestamp ?? UInt64(CFAbsoluteTimeGetCurrent() * 1000)
     }
 
     private func isSampleKeyFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {

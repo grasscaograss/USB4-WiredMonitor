@@ -2,6 +2,7 @@ using System.Windows;
 using Microsoft.Extensions.Logging;
 using WiredMonitorClient.Decoder;
 using WiredMonitorClient.Diagnostics;
+using WiredMonitorClient.Display;
 using WiredMonitorClient.Network;
 using WiredMonitorClient.Protocol;
 
@@ -68,7 +69,7 @@ public partial class App : Application
         receiver.OnReceiveError += (_, message) => DiagLog.Write($"Probe 接收错误: {message}");
 
         DiagLog.Write($"Probe 开始: {host}:{port}");
-        receiver.ConnectAsync(host, port).GetAwaiter().GetResult();
+        receiver.ConnectAsync(host, port, new ClientDisplayInfo(1920, 1080, 60, 96)).GetAwaiter().GetResult();
         Task.Delay(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
         receiver.Disconnect();
         DiagLog.Write($"Probe 结果: h264={h264Frames}, raw={rawFrames}, key={keyFrames}, bytes={bytes}");

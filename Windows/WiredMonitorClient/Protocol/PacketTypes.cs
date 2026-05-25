@@ -10,6 +10,7 @@ public enum PacketType : ushort
     FrameRaw = 0x0031,
     InputEvent = 0x0040,
     Stats = 0x0050,
+    CursorPosition = 0x0060,
 }
 
 public static class ProtocolConstants
@@ -23,6 +24,7 @@ public static class ProtocolConstants
     public const int H264FrameMetadataWithSize = 25;
     public const int RawFrameMetadataSize = 16;
     public const int RawFrameMetadataWithSize = 28;
+    public const int CursorPositionPayloadSize = 17;
 }
 
 public readonly struct PacketHeader
@@ -162,6 +164,33 @@ public readonly struct RawFramePayload
             Height = height,
             BytesPerRow = width > 0 ? width * 4 : 0,
             PixelData = payload[16..].ToArray(),
+        };
+    }
+}
+
+public readonly struct CursorPositionPayload
+{
+    public ulong Timestamp { get; init; }
+    public int X { get; init; }
+    public int Y { get; init; }
+    public bool Visible { get; init; }
+
+    public static CursorPositionPayload Parse(byte[] payload, int payloadLength)
+    {
+        return Parse(payload.AsSpan(0, payloadLength));
+    }
+
+    public static CursorPositionPayload Parse(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < ProtocolConstants.CursorPositionPayloadSize)
+            throw new ArgumentException("Cursor position payload is too short.", nameof(payload));
+
+        return new CursorPositionPayload
+        {
+            Timestamp = BitConverter.ToUInt64(payload[..8]),
+            X = (int)BitConverter.ToUInt32(payload[8..12]),
+            Y = (int)BitConverter.ToUInt32(payload[12..16]),
+            Visible = payload[16] != 0,
         };
     }
 }

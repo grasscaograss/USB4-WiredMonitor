@@ -4,7 +4,10 @@
         Title="Wired Monitor - 扩展屏客户端"
         Width="1280" Height="800"
         WindowStartupLocation="CenterScreen"
-        Background="#FF1E1E1E">
+        Background="#FF1E1E1E"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        PreviewKeyDown="Window_PreviewKeyDown">
 
     <Grid>
         <Grid.RowDefinitions>
@@ -14,7 +17,7 @@
         </Grid.RowDefinitions>
 
         <!-- 顶部工具栏 -->
-        <Border Grid.Row="0" Background="#FF2D2D2D" Padding="10,8">
+        <Border x:Name="TopToolbar" Grid.Row="0" Background="#FF2D2D2D" Padding="10,8">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
@@ -52,16 +55,27 @@
         </Border>
 
         <!-- 画面显示区 -->
-        <Grid Grid.Row="1" Background="#FF000000">
+        <Grid x:Name="DisplayHost" Grid.Row="1" Background="#FF000000"
+              UseLayoutRounding="True"
+              SnapsToDevicePixels="True">
             <Image x:Name="DisplayImage" Stretch="Uniform"
-                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                   SnapsToDevicePixels="True"
+                   RenderOptions.BitmapScalingMode="NearestNeighbor"/>
+            <Canvas x:Name="CursorOverlay" IsHitTestVisible="False">
+                <Path x:Name="RemoteCursor"
+                      Visibility="Collapsed"
+                      Fill="White"
+                      Stroke="Black"
+                      StrokeThickness="1.2"
+                      Data="M 0,0 L 0,22 L 6,16 L 10,27 L 15,25 L 11,14 L 20,14 Z"/>
+            </Canvas>
             <TextBlock x:Name="StatusText" Text="未连接 - 请输入 Mac 的 Thunderbolt IP 地址"
                        Foreground="#FF666666" FontSize="18"
                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
         </Grid>
 
         <!-- 底部状态栏 -->
-        <Border Grid.Row="2" Background="#FF2D2D2D" Padding="10,5">
+        <Border x:Name="BottomStatusBar" Grid.Row="2" Background="#FF2D2D2D" Padding="10,5">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>

@@ -8,6 +8,7 @@ class ScreenCapture {
     private let displayID: CGDirectDisplayID
     private let fps: Int
     private let scale: Double
+    private let includeCursor: Bool
     private var isRunning = false
     private var stream: SCStream?
     private var streamOutput: StreamOutput?
@@ -34,10 +35,26 @@ class ScreenCapture {
         } else {
             scale = 1
         }
+        includeCursor = Self.envBool("WIRED_MONITOR_CAPTURE_CURSOR", defaultValue: true)
     }
 
     var resolution: (width: Int, height: Int) {
         (width, height)
+    }
+
+    private static func envBool(_ key: String, defaultValue: Bool) -> Bool {
+        guard let value = ProcessInfo.processInfo.environment[key]?.lowercased() else {
+            return defaultValue
+        }
+
+        switch value {
+        case "1", "true", "yes", "on":
+            return true
+        case "0", "false", "no", "off":
+            return false
+        default:
+            return defaultValue
+        }
     }
 
     func start() async {
@@ -52,17 +69,27 @@ class ScreenCapture {
             return
         }
 
-        if captureMode == "cgstream" || ProcessInfo.processInfo.environment["WIRED_MONITOR_ACTIVE_CAPTURE"] == "1" {
-            print("[捕获] 强制使用 CGDisplayStream 主动捕获模式")
+        if captureMode == nil ||
+            captureMode == "cgstream" ||
+            captureMode == "displaystream" ||
+            ProcessInfo.processInfo.environment["WIRED_MONITOR_ACTIVE_CAPTURE"] == "1" {
+            print(captureMode == nil ? "[捕获] 默认使用 CGDisplayStream 主动捕获模式" : "[捕获] 强制使用 CGDisplayStream 主动捕获模式")
             startDisplayStream()
+            return
+        }
+
+        if captureMode != "sck" && captureMode != "screencapturekit" {
+            print("[捕获] 未知捕获模式 \(captureMode ?? "")，可用: cgstream/sck/image")
+            isRunning = false
             return
         }
 
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            DisplayDiagnostics.printShareableDisplays(content.displays, target: displayID, prefix: "[捕获]")
 
-            guard let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first else {
-                print("[捕获] 找不到显示器")
+            guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+                print("[捕获] ScreenCaptureKit 找不到目标显示器 displayID=\(displayID)，已拒绝抓取其它显示器")
                 isRunning = false
                 return
             }
@@ -84,7 +111,7 @@ class ScreenCapture {
             config.pixelFormat = kCVPixelFormatType_32BGRA
             config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(fps))
             config.queueDepth = 1
-            config.showsCursor = true
+            config.showsCursor = includeCursor
             config.capturesAudio = false
 
             let output = StreamOutput(capture: self)
@@ -95,12 +122,17 @@ class ScreenCapture {
 
             try await stream!.startCapture()
 
-            print("[捕获] ScreenCaptureKit 已启动 \(width)x\(height) @ \(fps)fps")
+            print("[捕获] ScreenCaptureKit 已启动 displayID=\(display.displayID), \(width)x\(height) @ \(fps)fps, cursor=\(includeCursor)")
         } catch {
             print("[捕获] ScreenCaptureKit 启动失败: \(error)")
-            print("[捕获] 回退到 CGDisplayCreateImage")
-            isRunning = false
-            await startFallback()
+            if ProcessInfo.processInfo.environment["WIRED_MONITOR_ALLOW_CAPTURE_FALLBACK"] == "1" {
+                print("[捕获] 已允许回退到 CGDisplayCreateImage")
+                isRunning = false
+                await startFallback()
+            } else {
+                print("[捕获] 未启用 WIRED_MONITOR_ALLOW_CAPTURE_FALLBACK，已停止以避免抓错显示器")
+                isRunning = false
+            }
         }
     }
 
@@ -125,6 +157,7 @@ class ScreenCapture {
 
     private func startDisplayStream() {
         isRunning = true
+        DisplayDiagnostics.printOnlineDisplays(prefix: "[捕获]")
 
         if let mode = CGDisplayCopyDisplayMode(displayID) {
             width = alignVideoDimension(Int(Double(mode.pixelWidth) * scale))
@@ -136,7 +169,7 @@ class ScreenCapture {
 
         let queue = DispatchQueue(label: "com.wiredmonitor.cgdisplaystream", qos: .userInteractive)
         let properties: [CFString: Any] = [
-            CGDisplayStream.showCursor: true,
+            CGDisplayStream.showCursor: includeCursor,
             CGDisplayStream.queueDepth: 1,
             CGDisplayStream.minimumFrameTime: 1.0 / Double(fps),
         ]
@@ -153,23 +186,35 @@ class ScreenCapture {
                 self?.handleDisplayStreamFrame(status: status, displayTime: displayTime, surface: surface)
             })
         else {
-            print("[捕获] CGDisplayStream 创建失败，回退到 CGDisplayCreateImage")
-            isRunning = false
-            Task { await self.startFallback() }
+            print("[捕获] CGDisplayStream 创建失败 displayID=\(displayID)")
+            if ProcessInfo.processInfo.environment["WIRED_MONITOR_ALLOW_CAPTURE_FALLBACK"] == "1" {
+                print("[捕获] 已允许回退到 CGDisplayCreateImage")
+                isRunning = false
+                Task { await self.startFallback() }
+            } else {
+                print("[捕获] 未启用 WIRED_MONITOR_ALLOW_CAPTURE_FALLBACK，已停止以避免抓错显示器")
+                isRunning = false
+            }
             return
         }
 
         let error = stream.start()
         guard error == .success else {
-            print("[捕获] CGDisplayStream 启动失败: \(error.rawValue)，回退到 CGDisplayCreateImage")
+            print("[捕获] CGDisplayStream 启动失败 displayID=\(displayID): \(error.rawValue)")
             _ = stream.stop()
-            isRunning = false
-            Task { await self.startFallback() }
+            if ProcessInfo.processInfo.environment["WIRED_MONITOR_ALLOW_CAPTURE_FALLBACK"] == "1" {
+                print("[捕获] 已允许回退到 CGDisplayCreateImage")
+                isRunning = false
+                Task { await self.startFallback() }
+            } else {
+                print("[捕获] 未启用 WIRED_MONITOR_ALLOW_CAPTURE_FALLBACK，已停止以避免抓错显示器")
+                isRunning = false
+            }
             return
         }
 
         displayStream = stream
-        print("[捕获] CGDisplayStream 已启动 \(width)x\(height) @ \(fps)fps")
+        print("[捕获] CGDisplayStream 已启动 displayID=\(displayID), \(width)x\(height) @ \(fps)fps, cursor=\(includeCursor)")
     }
 
     private func handleDisplayStreamFrame(status: CGDisplayStreamFrameStatus, displayTime: UInt64, surface: IOSurface?) {
@@ -289,6 +334,7 @@ class ScreenCapture {
     // ScreenCaptureKit output handler
     class StreamOutput: NSObject, SCStreamOutput {
         weak var capture: ScreenCapture?
+        private var loggedFirstFrame = false
 
         init(capture: ScreenCapture) {
             self.capture = capture
@@ -302,7 +348,10 @@ class ScreenCapture {
             }
 
             let ts = UInt64(CFAbsoluteTimeGetCurrent() * 1000)
-            print("[捕获] 收到帧 \(ts)")
+            if !loggedFirstFrame {
+                print("[捕获] 收到首帧 \(ts)")
+                loggedFirstFrame = true
+            }
             capture?.onFrame?(pixelBuffer, ts)
         }
     }

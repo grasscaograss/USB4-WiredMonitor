@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Extensions.Logging;
+using WiredMonitorClient.Diagnostics;
 using WiredMonitorClient.Protocol;
 
 namespace WiredMonitorClient.Rendering;
@@ -17,6 +19,10 @@ public class FrameRenderer
     private readonly object _renderLock = new();
     private PendingFrame? _pendingFrame;
     private bool _renderScheduled;
+    private DateTime _lastRenderReportTime = DateTime.UtcNow;
+    private long _renderTicks;
+    private int _renderFrames;
+    private int _replacedPendingFrames;
 
     public WriteableBitmap? Bitmap => _bitmap;
 
@@ -45,17 +51,26 @@ public class FrameRenderer
         if (!TryGetArray(frame.PixelData, out var data, out var offset)) return;
         if (data.Length - offset < expectedSize) return;
 
-        QueueLatestFrame(new PendingFrame(data, offset, sourceStride, FlipVertical: true));
+        QueueLatestFrame(new PendingFrame(data, offset, expectedSize, sourceStride, FlipVertical: true, ReturnBuffer: null));
     }
 
     public void RenderDecodedFrame(DecodedFrameData frame)
     {
-        if (_bitmap == null) return;
+        if (_bitmap == null)
+        {
+            frame.ReturnBuffer?.Invoke(frame.PixelData);
+            return;
+        }
 
         var data = frame.PixelData;
-        if (data.Length == 0) return;
+        var length = frame.PixelDataLength > 0 ? frame.PixelDataLength : data.Length;
+        if (data.Length == 0 || length <= 0)
+        {
+            frame.ReturnBuffer?.Invoke(data);
+            return;
+        }
 
-        QueueLatestFrame(new PendingFrame(data, 0, _stride, FlipVertical: false));
+        QueueLatestFrame(new PendingFrame(data, 0, length, _stride, FlipVertical: false, frame.ReturnBuffer));
     }
 
     private static bool TryGetArray(ReadOnlyMemory<byte> memory, out byte[] data, out int offset)
@@ -76,9 +91,14 @@ public class FrameRenderer
     private void QueueLatestFrame(PendingFrame frame)
     {
         var shouldSchedule = false;
+        PendingFrame? replacedFrame = null;
 
         lock (_renderLock)
         {
+            replacedFrame = _pendingFrame;
+            if (replacedFrame != null)
+                _replacedPendingFrames++;
+
             _pendingFrame = frame;
             if (!_renderScheduled)
             {
@@ -86,6 +106,8 @@ public class FrameRenderer
                 shouldSchedule = true;
             }
         }
+
+        replacedFrame?.ReturnBuffer?.Invoke(replacedFrame.Data);
 
         if (shouldSchedule)
             Application.Current.Dispatcher.BeginInvoke(RenderPendingFrame, DispatcherPriority.Render);
@@ -101,7 +123,16 @@ public class FrameRenderer
         }
 
         if (frame != null)
-            WriteFrame(frame);
+        {
+            try
+            {
+                WriteFrame(frame);
+            }
+            finally
+            {
+                frame.ReturnBuffer?.Invoke(frame.Data);
+            }
+        }
 
         var shouldScheduleAgain = false;
         lock (_renderLock)
@@ -124,9 +155,10 @@ public class FrameRenderer
     {
         if (_bitmap == null) return;
 
-        var copyLen = Math.Min(frame.Data.Length - frame.Offset, _stride * _height);
+        var copyLen = Math.Min(frame.Length, Math.Min(frame.Data.Length - frame.Offset, _stride * _height));
         if (copyLen <= 0) return;
 
+        var renderStart = Stopwatch.GetTimestamp();
         _bitmap.Lock();
         try
         {
@@ -162,9 +194,29 @@ public class FrameRenderer
         }
 
         OnFrameRendered?.Invoke(this, EventArgs.Empty);
+        RecordRenderWork(renderStart);
     }
 
-    private sealed record PendingFrame(byte[] Data, int Offset, int SourceStride, bool FlipVertical);
+    private void RecordRenderWork(long startTimestamp)
+    {
+        _renderTicks += Stopwatch.GetTimestamp() - startTimestamp;
+        _renderFrames++;
+
+        var now = DateTime.UtcNow;
+        if ((now - _lastRenderReportTime).TotalSeconds < 2.0)
+            return;
+
+        var avgMs = _renderTicks * 1000.0 / Stopwatch.Frequency / Math.Max(1, _renderFrames);
+        var frames = _renderFrames;
+        var replaced = _replacedPendingFrames;
+        _renderTicks = 0;
+        _renderFrames = 0;
+        _replacedPendingFrames = 0;
+        _lastRenderReportTime = now;
+        DiagLog.Write($"WPF渲染处理: frames={frames}, avg={avgMs:F1}ms, replaced={replaced}");
+    }
+
+    private sealed record PendingFrame(byte[] Data, int Offset, int Length, int SourceStride, bool FlipVertical, Action<byte[]>? ReturnBuffer);
 }
 
 public readonly struct DecodedFrameData
@@ -172,4 +224,6 @@ public readonly struct DecodedFrameData
     public int Width { get; init; }
     public int Height { get; init; }
     public byte[] PixelData { get; init; }
+    public int PixelDataLength { get; init; }
+    public Action<byte[]>? ReturnBuffer { get; init; }
 }

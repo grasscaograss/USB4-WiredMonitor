@@ -1,6 +1,8 @@
+using System.Buffers.Binary;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using WiredMonitorClient.Display;
 using WiredMonitorClient.Diagnostics;
 using WiredMonitorClient.Protocol;
 
@@ -16,12 +18,13 @@ public class FrameReceiver
 
     public event EventHandler<FramePayload>? OnH264Frame;
     public event EventHandler<RawFramePayload>? OnRawFrame;
+    public event EventHandler<CursorPositionPayload>? OnCursorPosition;
     public event EventHandler<bool>? OnConnectionChanged;
     public event EventHandler<string>? OnReceiveError;
 
     public bool IsConnected => _client?.Connected ?? false;
 
-    public async Task ConnectAsync(string host, int port, CancellationToken ct = default)
+    public async Task ConnectAsync(string host, int port, ClientDisplayInfo displayInfo, CancellationToken ct = default)
     {
         DiagLog.Write($"ConnectAsync 开始: {host}:{port}");
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -31,7 +34,7 @@ public class FrameReceiver
             ? new TcpClient()
             : new TcpClient(address.AddressFamily);
         _client.NoDelay = true;
-        _client.ReceiveBufferSize = 256 * 1024;
+        _client.ReceiveBufferSize = 64 * 1024;
 
         var connectTask = address == null
             ? _client.ConnectAsync(host, port)
@@ -39,6 +42,7 @@ public class FrameReceiver
         await connectTask.WaitAsync(TimeSpan.FromSeconds(5), ct);
 
         _stream = _client.GetStream();
+        await SendHelloAsync(displayInfo, _cts.Token);
         DiagLog.Write("TCP 连接成功");
 
         OnConnectionChanged?.Invoke(this, true);
@@ -71,6 +75,7 @@ public class FrameReceiver
         var frameCount = 0;
         var lastFpsTime = DateTime.UtcNow;
         var fpsCount = 0;
+        var cursorCount = 0;
         var loggedFirstPacket = false;
 
         while (!ct.IsCancellationRequested && _stream != null)
@@ -113,28 +118,68 @@ public class FrameReceiver
                 }
             }
 
+            var isVideoFrame = false;
             switch (packetType)
             {
                 case PacketType.FrameH264:
                     OnH264Frame?.Invoke(this, FramePayload.Parse(dataBuf, payloadLength));
+                    isVideoFrame = true;
                     break;
                 case PacketType.FrameRaw:
                     OnRawFrame?.Invoke(this, RawFramePayload.Parse(dataBuf, payloadLength, 0, 0));
+                    isVideoFrame = true;
+                    break;
+                case PacketType.CursorPosition:
+                    cursorCount++;
+                    OnCursorPosition?.Invoke(this, CursorPositionPayload.Parse(dataBuf, payloadLength));
                     break;
             }
 
-            frameCount++;
-            fpsCount++;
+            if (isVideoFrame)
+            {
+                frameCount++;
+                fpsCount++;
+            }
+
             var now = DateTime.UtcNow;
             if ((now - lastFpsTime).TotalSeconds >= 2.0)
             {
                 var fps = fpsCount / (now - lastFpsTime).TotalSeconds;
-                Console.WriteLine($"[网络] FPS: {fps:F1}");
-                DiagLog.Write($"网络 FPS: {fps:F1}, totalFrames={frameCount}");
+                var cursorFps = cursorCount / (now - lastFpsTime).TotalSeconds;
+                Console.WriteLine($"[网络] FPS: {fps:F1}, Cursor: {cursorFps:F1}");
+                DiagLog.Write($"网络 FPS: {fps:F1}, cursorFPS={cursorFps:F1}, totalFrames={frameCount}");
                 fpsCount = 0;
+                cursorCount = 0;
                 lastFpsTime = now;
             }
         }
+    }
+
+    private async Task SendHelloAsync(ClientDisplayInfo displayInfo, CancellationToken ct)
+    {
+        if (_stream == null) return;
+
+        var payload = new byte[16];
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0, 4), (uint)displayInfo.Width);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(4, 4), (uint)displayInfo.Height);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(8, 4), (uint)displayInfo.RefreshRate);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(12, 4), (uint)displayInfo.Dpi);
+
+        var header = new PacketHeader
+        {
+            Magic = ProtocolConstants.Magic,
+            Version = ProtocolConstants.Version,
+            Type = PacketType.Hello,
+            PayloadLength = (uint)payload.Length,
+        }.Encode();
+
+        var packet = new byte[header.Length + payload.Length];
+        Buffer.BlockCopy(header, 0, packet, 0, header.Length);
+        Buffer.BlockCopy(payload, 0, packet, header.Length, payload.Length);
+
+        await _stream.WriteAsync(packet.AsMemory(0, packet.Length), ct);
+        await _stream.FlushAsync(ct);
+        DiagLog.Write($"发送HELLO: {displayInfo.Width}x{displayInfo.Height} @ {displayInfo.RefreshRate}Hz, dpi={displayInfo.Dpi}");
     }
 
     private async Task<LegacyFrame?> TryReadLegacyFrame(byte[] firstBytes, byte[]? dataBuf, CancellationToken ct)
