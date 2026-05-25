@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using Microsoft.Extensions.Logging;
 using WiredMonitorClient.Decoder;
 using WiredMonitorClient.Diagnostics;
@@ -15,17 +16,20 @@ namespace WiredMonitorClient;
 
 public partial class MainWindow : Window
 {
-    private const int ReceiveBackpressureHighWatermark = 1;
-    private const int ReceiveBackpressureLowWatermark = 0;
-    private const int MaxReceiveBackpressureSleepMs = 40;
-    private const int EmergencyQueuedH264Frames = 90;
-    private const int MaxQueueLatencyMs = 800;
+    private const int ReceiveBackpressureHighWatermark = 6;
+    private const int ReceiveBackpressureLowWatermark = 2;
+    private const int MaxReceiveBackpressureSleepMs = 2;
+    private const int EmergencyQueuedH264Frames = 45;
+    private const int MaxQueueLatencyMs = 220;
+    private const int ResumeQueueLatencyMs = 180;
+    private const int MaxQueuedFramesForOutput = 2;
     private const long MacAbsoluteEpochOffsetMs = 978_307_200_000;
 
     private readonly ILogger _logger;
     private readonly FrameReceiver _receiver;
     private readonly FrameRenderer _renderer;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly IntPtr _windowHandle;
     private H264Decoder? _h264Decoder;
     private readonly ConcurrentQueue<FramePayload> _h264Queue = new();
     private readonly SemaphoreSlim _h264Signal = new(0);
@@ -58,6 +62,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _windowHandle = new WindowInteropHelper(this).EnsureHandle();
         DiagLog.Write($"应用启动: {AppContext.BaseDirectory}");
 
         _loggerFactory = LoggerFactory.Create(builder =>
@@ -68,7 +73,7 @@ public partial class MainWindow : Window
 
         _logger = _loggerFactory.CreateLogger<MainWindow>();
         _receiver = new FrameReceiver();
-        _renderer = new FrameRenderer(_loggerFactory.CreateLogger<FrameRenderer>());
+        _renderer = new FrameRenderer(_loggerFactory.CreateLogger<FrameRenderer>(), _windowHandle);
 
         _receiver.OnH264Frame += OnH264Frame;
         _receiver.OnRawFrame += OnRawFrame;
@@ -77,6 +82,7 @@ public partial class MainWindow : Window
         _receiver.OnReceiveError += OnReceiveError;
 
         _renderer.OnFrameRendered += OnFrameRendered;
+        _renderer.OnImageSourceChanged += OnImageSourceChanged;
     }
 
     private async void ConnectButton_Click(object sender, RoutedEventArgs e)
@@ -258,47 +264,45 @@ public partial class MainWindow : Window
             DiagLog.Write($"H264低延迟状态: queue={queuedFrames}, lag={queueLatencyMs}ms, key={frame.IsKeyFrame}, idx={frame.FrameIndex}");
         }
 
+        if (_dropUntilKeyFrame)
+        {
+            if (!frame.IsKeyFrame || queueLatencyMs > ResumeQueueLatencyMs)
+            {
+                if (frame.IsKeyFrame && queueLatencyMs > ResumeQueueLatencyMs)
+                    DiagLog.Write($"跳过过期关键帧，继续追帧 lag={queueLatencyMs}ms, idx={frame.FrameIndex}");
+                return;
+            }
+
+            DiagLog.Write($"收到低延迟关键帧，恢复解码 lag={queueLatencyMs}ms, idx={frame.FrameIndex}");
+            ClearH264Queue();
+            _dropUntilKeyFrame = false;
+            _resetDecoderOnNextKeyFrame = true;
+        }
+
         if (queuedFrames >= EmergencyQueuedH264Frames)
         {
             DiagLog.Write($"H264 解码落后，清空到下一关键帧 queued={queuedFrames}, lag={queueLatencyMs}ms, currentKey={frame.IsKeyFrame}");
             ClearH264Queue();
             _resetDecoderOnNextKeyFrame = true;
+            _dropUntilKeyFrame = true;
 
-            if (!frame.IsKeyFrame)
-            {
-                _dropUntilKeyFrame = true;
+            if (!frame.IsKeyFrame || queueLatencyMs > ResumeQueueLatencyMs)
                 return;
-            }
+
+            _dropUntilKeyFrame = false;
         }
-        else if (queueLatencyMs > MaxQueueLatencyMs && (now - _lastCatchUpTime).TotalSeconds >= 2.0)
+        else if (queueLatencyMs > MaxQueueLatencyMs)
         {
-            DiagLog.Write($"H264 延迟过高，快速追帧到下一关键帧 queued={queuedFrames}, lag={queueLatencyMs}ms, currentKey={frame.IsKeyFrame}, idx={frame.FrameIndex}");
+            DiagLog.Write($"H264 延迟过高，丢弃到低延迟关键帧 queued={queuedFrames}, lag={queueLatencyMs}ms, currentKey={frame.IsKeyFrame}, idx={frame.FrameIndex}");
             _lastCatchUpTime = now;
             ClearH264Queue();
             _resetDecoderOnNextKeyFrame = true;
+            _dropUntilKeyFrame = true;
 
-            if (!frame.IsKeyFrame)
-            {
-                _dropUntilKeyFrame = true;
+            if (!frame.IsKeyFrame || queueLatencyMs > ResumeQueueLatencyMs)
                 return;
-            }
-        }
-        else if (queueLatencyMs > MaxQueueLatencyMs && (now - _lastLatencyLogTime).TotalSeconds >= 0.5)
-        {
-            DiagLog.Write($"H264延迟偏高但等待追帧冷却: queue={queuedFrames}, lag={queueLatencyMs}ms, idx={frame.FrameIndex}");
-        }
 
-        if (_dropUntilKeyFrame)
-        {
-            if (!frame.IsKeyFrame)
-            {
-                return;
-            }
-
-            DiagLog.Write($"收到关键帧，恢复低延迟解码 idx={frame.FrameIndex}");
-            ClearH264Queue();
             _dropUntilKeyFrame = false;
-            _resetDecoderOnNextKeyFrame = true;
         }
 
         _h264Queue.Enqueue(frame);
@@ -391,6 +395,7 @@ public partial class MainWindow : Window
             {
                 if (_h264Decoder.Initialize(decoderWidth, decoderHeight))
                 {
+                    _h264Decoder.ShouldOutputFrame = ShouldOutputDecodedFrame;
                     _h264Decoder.OnFrameDecoded += OnDecodedFrame;
                     Dispatcher.Invoke(() =>
                     {
@@ -438,6 +443,14 @@ public partial class MainWindow : Window
                 _dropUntilKeyFrame = true;
             }
         }
+    }
+
+    private bool ShouldOutputDecodedFrame()
+    {
+        if (Volatile.Read(ref _queuedH264Frames) > MaxQueuedFramesForOutput)
+            return false;
+
+        return !_renderer.HasPendingFrame;
     }
 
     private void ClearH264Queue()
@@ -605,12 +618,18 @@ public partial class MainWindow : Window
         }
     }
 
+    private void OnImageSourceChanged(object? sender, EventArgs e)
+    {
+        DisplayImage.Source = _renderer.Bitmap;
+    }
+
     protected override void OnClosed(EventArgs e)
     {
         _decodeCts?.Cancel();
         _h264Signal.Release();
         _receiver.Disconnect();
         _h264Decoder?.Dispose();
+        _renderer.Dispose();
         _loggerFactory.Dispose();
         base.OnClosed(e);
     }

@@ -38,8 +38,10 @@ public unsafe class H264Decoder : IDisposable
     private DateTime _lastDecodeWorkReportTime = DateTime.UtcNow;
     private long _decodeWorkTicks;
     private int _decodeWorkFrames;
+    private int _skippedOutputFrames;
 
     public event EventHandler<DecodedFrame>? OnFrameDecoded;
+    public Func<bool>? ShouldOutputFrame { get; set; }
 
     public H264Decoder(ILogger<H264Decoder> logger)
     {
@@ -286,6 +288,13 @@ public unsafe class H264Decoder : IDisposable
 
                 while (ffmpeg.avcodec_receive_frame(_codecContext, _frame) == 0)
                 {
+                    if (_hardwareFrameLogged && ShouldOutputFrame?.Invoke() == false)
+                    {
+                        _skippedOutputFrames++;
+                        ffmpeg.av_frame_unref(_frame);
+                        continue;
+                    }
+
                     var decodeWorkStart = Stopwatch.GetTimestamp();
                     var bgraFrame = ConvertFrameToBGRA(_frame);
                     if (bgraFrame != null)
@@ -488,9 +497,10 @@ public unsafe class H264Decoder : IDisposable
             return;
 
         var avgMs = _decodeWorkTicks * 1000.0 / Stopwatch.Frequency / Math.Max(1, _decodeWorkFrames);
-        DiagLog.Write($"H264解码处理: frames={_decodeWorkFrames}, avg={avgMs:F1}ms");
+        DiagLog.Write($"H264解码处理: frames={_decodeWorkFrames}, avg={avgMs:F1}ms, skippedOutput={_skippedOutputFrames}");
         _decodeWorkTicks = 0;
         _decodeWorkFrames = 0;
+        _skippedOutputFrames = 0;
         _lastDecodeWorkReportTime = now;
     }
 

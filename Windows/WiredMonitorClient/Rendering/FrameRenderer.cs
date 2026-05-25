@@ -12,7 +12,9 @@ namespace WiredMonitorClient.Rendering;
 public class FrameRenderer
 {
     private readonly ILogger _logger;
+    private readonly IntPtr _windowHandle;
     private WriteableBitmap? _bitmap;
+    private D3DImageFramePresenter? _d3dPresenter;
     private int _width;
     private int _height;
     private int _stride;
@@ -23,14 +25,28 @@ public class FrameRenderer
     private long _renderTicks;
     private int _renderFrames;
     private int _replacedPendingFrames;
+    private string _rendererName = "none";
 
-    public WriteableBitmap? Bitmap => _bitmap;
+    public ImageSource? Bitmap => (ImageSource?)_d3dPresenter?.Image ?? _bitmap;
+
+    public bool HasPendingFrame
+    {
+        get
+        {
+            lock (_renderLock)
+            {
+                return _pendingFrame != null;
+            }
+        }
+    }
 
     public event EventHandler? OnFrameRendered;
+    public event EventHandler? OnImageSourceChanged;
 
-    public FrameRenderer(ILogger<FrameRenderer> logger)
+    public FrameRenderer(ILogger<FrameRenderer> logger, IntPtr windowHandle)
     {
         _logger = logger;
+        _windowHandle = windowHandle;
     }
 
     public void Initialize(int width, int height)
@@ -38,13 +54,35 @@ public class FrameRenderer
         _width = width;
         _height = height;
         _stride = width * 4;
+        _d3dPresenter?.Dispose();
+        _d3dPresenter = null;
+        _bitmap = null;
+
+        if (ShouldUseD3DImage())
+        {
+            var presenter = new D3DImageFramePresenter(_windowHandle);
+            if (presenter.Initialize(width, height))
+            {
+                _d3dPresenter = presenter;
+                _rendererName = "D3DImage";
+                _logger.LogInformation("D3DImage 渲染器已初始化 ({Width}x{Height})", width, height);
+                OnImageSourceChanged?.Invoke(this, EventArgs.Empty);
+                return;
+            }
+
+            presenter.Dispose();
+            _logger.LogWarning("D3DImage 渲染器初始化失败，回退到 WriteableBitmap");
+        }
+
         _bitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgra32, null);
-        _logger.LogInformation("渲染器已初始化 ({Width}x{Height})", width, height);
+        _rendererName = "WriteableBitmap";
+        _logger.LogInformation("WriteableBitmap 渲染器已初始化 ({Width}x{Height})", width, height);
+        OnImageSourceChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void RenderRawFrame(RawFramePayload frame)
     {
-        if (_bitmap == null) return;
+        if (_bitmap == null && _d3dPresenter == null) return;
 
         var sourceStride = frame.BytesPerRow > 0 ? frame.BytesPerRow : _stride;
         var expectedSize = sourceStride * _height;
@@ -56,7 +94,7 @@ public class FrameRenderer
 
     public void RenderDecodedFrame(DecodedFrameData frame)
     {
-        if (_bitmap == null)
+        if (_bitmap == null && _d3dPresenter == null)
         {
             frame.ReturnBuffer?.Invoke(frame.PixelData);
             return;
@@ -153,12 +191,32 @@ public class FrameRenderer
 
     private void WriteFrame(PendingFrame frame)
     {
-        if (_bitmap == null) return;
+        if (_bitmap == null && _d3dPresenter == null) return;
 
         var copyLen = Math.Min(frame.Length, Math.Min(frame.Data.Length - frame.Offset, _stride * _height));
         if (copyLen <= 0) return;
 
         var renderStart = Stopwatch.GetTimestamp();
+        if (_d3dPresenter != null)
+        {
+            if (_d3dPresenter.Present(frame.Data, frame.Offset, copyLen, frame.SourceStride, frame.FlipVertical))
+            {
+                OnFrameRendered?.Invoke(this, EventArgs.Empty);
+                RecordRenderWork(renderStart);
+                return;
+            }
+
+            _logger.LogWarning("D3DImage Present 失败，回退到 WriteableBitmap");
+            DiagLog.Write("D3DImage Present 失败，回退到 WriteableBitmap");
+            _d3dPresenter.Dispose();
+            _d3dPresenter = null;
+            _bitmap = new WriteableBitmap(_width, _height, 96, 96, PixelFormats.Bgra32, null);
+            _rendererName = "WriteableBitmap";
+            OnImageSourceChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        if (_bitmap == null) return;
+
         _bitmap.Lock();
         try
         {
@@ -213,7 +271,22 @@ public class FrameRenderer
         _renderFrames = 0;
         _replacedPendingFrames = 0;
         _lastRenderReportTime = now;
-        DiagLog.Write($"WPF渲染处理: frames={frames}, avg={avgMs:F1}ms, replaced={replaced}");
+        DiagLog.Write($"显示渲染处理: renderer={_rendererName}, frames={frames}, avg={avgMs:F1}ms, replaced={replaced}");
+    }
+
+    private static bool ShouldUseD3DImage()
+    {
+        var renderer = Environment.GetEnvironmentVariable("WIRED_MONITOR_RENDERER");
+        return !string.Equals(renderer, "wpf", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(renderer, "writeablebitmap", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public void Dispose()
+    {
+        _d3dPresenter?.Dispose();
+        _d3dPresenter = null;
+        _bitmap = null;
+        _rendererName = "none";
     }
 
     private sealed record PendingFrame(byte[] Data, int Offset, int Length, int SourceStride, bool FlipVertical, Action<byte[]>? ReturnBuffer);
