@@ -23,6 +23,9 @@ public class FrameRenderer
     private bool _renderScheduled;
     private DateTime _lastRenderReportTime = DateTime.UtcNow;
     private long _renderTicks;
+    private long _d3dUploadTicks;
+    private long _d3dUpdateSurfaceTicks;
+    private long _d3dDirtyTicks;
     private int _renderFrames;
     private int _replacedPendingFrames;
     private string _rendererName = "none";
@@ -199,10 +202,10 @@ public class FrameRenderer
         var renderStart = Stopwatch.GetTimestamp();
         if (_d3dPresenter != null)
         {
-            if (_d3dPresenter.Present(frame.Data, frame.Offset, copyLen, frame.SourceStride, frame.FlipVertical))
+            if (_d3dPresenter.Present(frame.Data, frame.Offset, copyLen, frame.SourceStride, frame.FlipVertical, out var presentMetrics))
             {
                 OnFrameRendered?.Invoke(this, EventArgs.Empty);
-                RecordRenderWork(renderStart);
+                RecordRenderWork(renderStart, presentMetrics);
                 return;
             }
 
@@ -255,24 +258,46 @@ public class FrameRenderer
         RecordRenderWork(renderStart);
     }
 
-    private void RecordRenderWork(long startTimestamp)
+    private void RecordRenderWork(long startTimestamp, D3DImagePresentMetrics presentMetrics = default)
     {
         _renderTicks += Stopwatch.GetTimestamp() - startTimestamp;
+        _d3dUploadTicks += presentMetrics.UploadTicks;
+        _d3dUpdateSurfaceTicks += presentMetrics.UpdateSurfaceTicks;
+        _d3dDirtyTicks += presentMetrics.DirtyTicks;
         _renderFrames++;
 
         var now = DateTime.UtcNow;
         if ((now - _lastRenderReportTime).TotalSeconds < 2.0)
             return;
 
-        var avgMs = _renderTicks * 1000.0 / Stopwatch.Frequency / Math.Max(1, _renderFrames);
+        var frameCount = Math.Max(1, _renderFrames);
+        var avgMs = TicksToAverageMs(_renderTicks, frameCount);
+        var uploadMs = TicksToAverageMs(_d3dUploadTicks, frameCount);
+        var updateMs = TicksToAverageMs(_d3dUpdateSurfaceTicks, frameCount);
+        var dirtyMs = TicksToAverageMs(_d3dDirtyTicks, frameCount);
+        var otherMs = Math.Max(0, avgMs - uploadMs - updateMs - dirtyMs);
         var frames = _renderFrames;
         var replaced = _replacedPendingFrames;
+        var renderer = _rendererName;
         _renderTicks = 0;
+        _d3dUploadTicks = 0;
+        _d3dUpdateSurfaceTicks = 0;
+        _d3dDirtyTicks = 0;
         _renderFrames = 0;
         _replacedPendingFrames = 0;
         _lastRenderReportTime = now;
-        DiagLog.Write($"显示渲染处理: renderer={_rendererName}, frames={frames}, avg={avgMs:F1}ms, replaced={replaced}");
+
+        if (renderer == "D3DImage")
+        {
+            DiagLog.Write($"显示渲染处理: renderer={renderer}, frames={frames}, avg={avgMs:F1}ms, upload={uploadMs:F1}ms, updateSurface={updateMs:F1}ms, dirty={dirtyMs:F1}ms, other={otherMs:F1}ms, replaced={replaced}");
+            return;
+        }
+
+        DiagLog.Write($"显示渲染处理: renderer={renderer}, frames={frames}, avg={avgMs:F1}ms, replaced={replaced}");
     }
+
+    private static double TicksToAverageMs(long ticks, int frames) =>
+        ticks * 1000.0 / Stopwatch.Frequency / Math.Max(1, frames);
 
     private static bool ShouldUseD3DImage()
     {

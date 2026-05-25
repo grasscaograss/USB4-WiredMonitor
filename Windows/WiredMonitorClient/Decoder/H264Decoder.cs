@@ -37,6 +37,8 @@ public unsafe class H264Decoder : IDisposable
     private readonly bool _decodedHashDiagnostics = Environment.GetEnvironmentVariable("WIRED_MONITOR_DIAG_HASH") == "1";
     private DateTime _lastDecodeWorkReportTime = DateTime.UtcNow;
     private long _decodeWorkTicks;
+    private long _hwTransferTicks;
+    private long _swsScaleTicks;
     private int _decodeWorkFrames;
     private int _skippedOutputFrames;
 
@@ -371,6 +373,7 @@ public unsafe class H264Decoder : IDisposable
                 _hardwareFrameLogged = true;
                 _logger.LogInformation("H.264 硬件解码输出已启用: {DeviceType}", _hwDeviceType);
                 DiagLog.Write($"H.264 硬件解码输出已启用: {_hwDeviceType}");
+                DiagLog.Write($"D3D11VA硬解纹理: format={(AVPixelFormat)frame->format}, texture={PointerToHex(frame->data[0])}, slice={PointerToHex(frame->data[1])}, hwFramesCtx={PointerToHex(frame->hw_frames_ctx)}");
             }
 
             return ConvertSoftwareFrameToBGRA(sourceFrame);
@@ -394,7 +397,9 @@ public unsafe class H264Decoder : IDisposable
         }
 
         ffmpeg.av_frame_unref(_hwTransferFrame);
+        var transferStart = Stopwatch.GetTimestamp();
         var ret = ffmpeg.av_hwframe_transfer_data(_hwTransferFrame, frame, 0);
+        var transferTicks = Stopwatch.GetTimestamp() - transferStart;
         if (ret < 0)
         {
             var error = ErrorToString(ret);
@@ -402,6 +407,8 @@ public unsafe class H264Decoder : IDisposable
             DiagLog.Write($"硬件解码帧传输失败: {error}");
             return null;
         }
+
+        _hwTransferTicks += transferTicks;
 
         if (_hwTransferFrame->width == 0)
             _hwTransferFrame->width = frame->width;
@@ -463,9 +470,11 @@ public unsafe class H264Decoder : IDisposable
                 dstData[2] = null;
                 dstData[3] = null;
 
+                var swsStart = Stopwatch.GetTimestamp();
                 var scaledRows = ffmpeg.sws_scale(_swsContext,
                     frame->data, frame->linesize, 0, height,
                     dstData, dstLinesize);
+                var swsTicks = Stopwatch.GetTimestamp() - swsStart;
 
                 if (scaledRows <= 0)
                 {
@@ -474,6 +483,8 @@ public unsafe class H264Decoder : IDisposable
                     ArrayPool<byte>.Shared.Return(result);
                     return null;
                 }
+
+                _swsScaleTicks += swsTicks;
             }
 
             return new BgraFrameBuffer(result, _convBufferSize, buffer => ArrayPool<byte>.Shared.Return(buffer));
@@ -496,13 +507,24 @@ public unsafe class H264Decoder : IDisposable
         if ((now - _lastDecodeWorkReportTime).TotalSeconds < 2.0)
             return;
 
-        var avgMs = _decodeWorkTicks * 1000.0 / Stopwatch.Frequency / Math.Max(1, _decodeWorkFrames);
-        DiagLog.Write($"H264解码处理: frames={_decodeWorkFrames}, avg={avgMs:F1}ms, skippedOutput={_skippedOutputFrames}");
+        var frames = Math.Max(1, _decodeWorkFrames);
+        var avgMs = TicksToAverageMs(_decodeWorkTicks, frames);
+        var transferAvgMs = TicksToAverageMs(_hwTransferTicks, frames);
+        var swsAvgMs = TicksToAverageMs(_swsScaleTicks, frames);
+        var otherAvgMs = Math.Max(0, avgMs - transferAvgMs - swsAvgMs);
+        DiagLog.Write($"H264解码处理: frames={_decodeWorkFrames}, avg={avgMs:F1}ms, transfer={transferAvgMs:F1}ms, sws={swsAvgMs:F1}ms, other={otherAvgMs:F1}ms, skippedOutput={_skippedOutputFrames}");
         _decodeWorkTicks = 0;
+        _hwTransferTicks = 0;
+        _swsScaleTicks = 0;
         _decodeWorkFrames = 0;
         _skippedOutputFrames = 0;
         _lastDecodeWorkReportTime = now;
     }
+
+    private static double TicksToAverageMs(long ticks, int frames) =>
+        ticks * 1000.0 / Stopwatch.Frequency / Math.Max(1, frames);
+
+    private static string PointerToHex(void* pointer) => $"0x{(nuint)pointer:x}";
 
     private static string ErrorToString(int error)
     {

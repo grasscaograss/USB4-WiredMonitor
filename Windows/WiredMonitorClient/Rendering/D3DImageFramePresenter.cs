@@ -138,14 +138,23 @@ internal sealed class D3DImageFramePresenter : IDisposable
         return true;
     }
 
-    public unsafe bool Present(byte[] data, int offset, int length, int sourceStride, bool flipVertical)
+    public unsafe bool Present(
+        byte[] data,
+        int offset,
+        int length,
+        int sourceStride,
+        bool flipVertical,
+        out D3DImagePresentMetrics metrics)
     {
+        metrics = default;
+
         if (_device == IntPtr.Zero || _uploadSurface == IntPtr.Zero || _renderSurface == IntPtr.Zero)
             return false;
 
         if (data.Length - offset < Math.Min(length, sourceStride * _height))
             return false;
 
+        var uploadStart = Stopwatch.GetTimestamp();
         var hr = LockRect(_uploadSurface, out var lockedRect, IntPtr.Zero, 0);
         if (Failed(hr) || lockedRect.pBits == IntPtr.Zero)
         {
@@ -183,8 +192,11 @@ internal sealed class D3DImageFramePresenter : IDisposable
         {
             _ = UnlockRect(_uploadSurface);
         }
+        metrics = metrics with { UploadTicks = Stopwatch.GetTimestamp() - uploadStart };
 
+        var updateStart = Stopwatch.GetTimestamp();
         hr = UpdateSurface(_device, _uploadSurface, IntPtr.Zero, _renderSurface, IntPtr.Zero);
+        metrics = metrics with { UpdateSurfaceTicks = Stopwatch.GetTimestamp() - updateStart };
         if (Failed(hr))
         {
             DiagLog.Write($"D3DImage UpdateSurface 失败: hr=0x{hr:x8}");
@@ -193,6 +205,7 @@ internal sealed class D3DImageFramePresenter : IDisposable
 
         if (_image.IsFrontBufferAvailable)
         {
+            var dirtyStart = Stopwatch.GetTimestamp();
             _image.Lock();
             try
             {
@@ -202,6 +215,7 @@ internal sealed class D3DImageFramePresenter : IDisposable
             {
                 _image.Unlock();
             }
+            metrics = metrics with { DirtyTicks = Stopwatch.GetTimestamp() - dirtyStart };
         }
 
         return true;
@@ -415,3 +429,5 @@ internal sealed class D3DImageFramePresenter : IDisposable
         public IntPtr pBits;
     }
 }
+
+internal readonly record struct D3DImagePresentMetrics(long UploadTicks, long UpdateSurfaceTicks, long DirtyTicks);
