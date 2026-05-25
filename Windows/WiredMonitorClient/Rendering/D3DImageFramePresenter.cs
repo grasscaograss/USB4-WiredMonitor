@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
 using WiredMonitorClient.Diagnostics;
+using WiredMonitorClient.Video;
 
 namespace WiredMonitorClient.Rendering;
 
@@ -23,11 +24,13 @@ internal sealed class D3DImageFramePresenter : IDisposable
 
     private readonly IntPtr _windowHandle;
     private readonly D3DImage _image = new();
+    private readonly D3D11VideoRenderer _d3d11VideoRenderer = new();
     private IntPtr _d3d;
     private IntPtr _device;
     private IntPtr _renderTexture;
     private IntPtr _renderSurface;
     private IntPtr _uploadSurface;
+    private IntPtr _sharedHandle;
     private int _width;
     private int _height;
     private int _stride;
@@ -84,19 +87,9 @@ internal sealed class D3DImageFramePresenter : IDisposable
             return false;
         }
 
-        hr = CreateTexture(
-            _device,
-            (uint)width,
-            (uint)height,
-            1,
-            D3DUSAGE_RENDERTARGET,
-            D3DFMT_A8R8G8B8,
-            D3DPOOL_DEFAULT,
-            out _renderTexture,
-            IntPtr.Zero);
-        if (Failed(hr) || _renderTexture == IntPtr.Zero)
+        if (!TryCreateRenderTexture(width, height, preferShared: true)
+            && !TryCreateRenderTexture(width, height, preferShared: false))
         {
-            DiagLog.Write($"D3DImage 初始化失败: CreateTexture hr=0x{hr:x8}");
             DisposeResources();
             return false;
         }
@@ -135,6 +128,35 @@ internal sealed class D3DImageFramePresenter : IDisposable
         }
 
         DiagLog.Write($"D3DImage 渲染器已初始化: {width}x{height}");
+        return true;
+    }
+
+    private unsafe bool TryCreateRenderTexture(int width, int height, bool preferShared)
+    {
+        var sharedHandle = IntPtr.Zero;
+        var sharedHandlePtr = preferShared ? (IntPtr)(&sharedHandle) : IntPtr.Zero;
+        var hr = CreateTexture(
+            _device,
+            (uint)width,
+            (uint)height,
+            1,
+            D3DUSAGE_RENDERTARGET,
+            D3DFMT_A8R8G8B8,
+            D3DPOOL_DEFAULT,
+            out _renderTexture,
+            sharedHandlePtr);
+
+        if (Failed(hr) || _renderTexture == IntPtr.Zero)
+        {
+            DiagLog.Write($"D3DImage 初始化失败: CreateTexture shared={preferShared} hr=0x{hr:x8}");
+            _renderTexture = IntPtr.Zero;
+            return false;
+        }
+
+        _sharedHandle = preferShared ? sharedHandle : IntPtr.Zero;
+        if (preferShared && _sharedHandle == IntPtr.Zero)
+            DiagLog.Write("D3DImage 共享纹理创建成功但未返回 shared handle，D3D11 直通将不可用");
+
         return true;
     }
 
@@ -221,6 +243,46 @@ internal sealed class D3DImageFramePresenter : IDisposable
         return true;
     }
 
+    public bool PresentD3D11Frame(D3D11DecodedFrame frame, out D3D11DirectPresentMetrics metrics)
+    {
+        metrics = default;
+
+        try
+        {
+            if (_renderSurface == IntPtr.Zero || _sharedHandle == IntPtr.Zero)
+                return false;
+
+            if (!_d3d11VideoRenderer.Initialize(frame.Device, frame.DeviceContext, _sharedHandle, _width, _height))
+                return false;
+
+            if (!_d3d11VideoRenderer.Present(frame, out metrics))
+                return false;
+
+            if (_image.IsFrontBufferAvailable)
+            {
+                var dirtyStart = Stopwatch.GetTimestamp();
+                _image.Lock();
+                try
+                {
+                    _image.AddDirtyRect(new Int32Rect(0, 0, _width, _height));
+                }
+                finally
+                {
+                    _image.Unlock();
+                }
+
+                metrics = metrics with { DirtyTicks = Stopwatch.GetTimestamp() - dirtyStart };
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write(ex, "D3D11直通渲染异常");
+            return false;
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -233,6 +295,8 @@ internal sealed class D3DImageFramePresenter : IDisposable
 
     private void DisposeResources()
     {
+        _d3d11VideoRenderer.Dispose();
+
         if (_image.Dispatcher.CheckAccess())
         {
             _image.Lock();
@@ -251,6 +315,7 @@ internal sealed class D3DImageFramePresenter : IDisposable
         ReleaseCom(ref _renderTexture);
         ReleaseCom(ref _device);
         ReleaseCom(ref _d3d);
+        _sharedHandle = IntPtr.Zero;
     }
 
     private static bool Failed(int hr) => hr < 0;

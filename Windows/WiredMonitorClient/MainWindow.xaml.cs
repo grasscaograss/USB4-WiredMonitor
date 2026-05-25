@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
 using Microsoft.Extensions.Logging;
 using WiredMonitorClient.Decoder;
 using WiredMonitorClient.Diagnostics;
@@ -11,6 +12,7 @@ using WiredMonitorClient.Display;
 using WiredMonitorClient.Network;
 using WiredMonitorClient.Protocol;
 using WiredMonitorClient.Rendering;
+using WiredMonitorClient.Video;
 
 namespace WiredMonitorClient;
 
@@ -64,6 +66,11 @@ public partial class MainWindow : Window
     private WindowState _previousWindowState = WindowState.Normal;
     private WindowStyle _previousWindowStyle = WindowStyle.SingleBorderWindow;
     private ResizeMode _previousResizeMode = ResizeMode.CanResize;
+    private int _lastLayoutPhysicalWidth;
+    private int _lastLayoutPhysicalHeight;
+    private double _lastLayoutScale;
+    private bool _lastLayoutPixelPerfect;
+    private DateTime _lastLayoutLogTime = DateTime.MinValue;
 
     public MainWindow()
     {
@@ -89,6 +96,7 @@ public partial class MainWindow : Window
 
         _renderer.OnFrameRendered += OnFrameRendered;
         _renderer.OnImageSourceChanged += OnImageSourceChanged;
+        DisplayHost.SizeChanged += (_, _) => UpdateDisplayImageLayout();
     }
 
     private async void ConnectButton_Click(object sender, RoutedEventArgs e)
@@ -449,10 +457,17 @@ public partial class MainWindow : Window
                 if (_h264Decoder.Initialize(decoderWidth, decoderHeight))
                 {
                     _h264Decoder.ShouldOutputFrame = ShouldOutputDecodedFrame;
+                    _h264Decoder.ShouldUseD3D11Output = () => _renderer.CanUseD3D11Direct;
                     _h264Decoder.OnFrameDecoded += OnDecodedFrame;
+                    _h264Decoder.OnD3D11FrameDecoded += OnD3D11FrameDecoded;
                     Dispatcher.Invoke(() =>
                     {
-                        StatusText.Text = $"H.264 硬解中 {decoderWidth}x{decoderHeight}...";
+                        _displayWidth = decoderWidth;
+                        _displayHeight = decoderHeight;
+                        _renderer.Initialize(_displayWidth, _displayHeight);
+                        DisplayImage.Source = _renderer.Bitmap;
+                        UpdateDisplayImageLayout();
+                        StatusText.Visibility = Visibility.Collapsed;
                     });
                 }
                 else
@@ -538,6 +553,7 @@ public partial class MainWindow : Window
             {
                 _renderer.Initialize(_displayWidth, _displayHeight);
                 DisplayImage.Source = _renderer.Bitmap;
+                UpdateDisplayImageLayout();
                 StatusText.Text = $"H.264 {_displayWidth}x{_displayHeight}";
                 StatusText.Visibility = Visibility.Collapsed;
             });
@@ -551,6 +567,29 @@ public partial class MainWindow : Window
             PixelDataLength = decodedFrame.PixelDataLength,
             ReturnBuffer = decodedFrame.ReturnBuffer,
         });
+    }
+
+    private void OnD3D11FrameDecoded(object? sender, D3D11DecodedFrame decodedFrame)
+    {
+        _hasDecodedFrame = true;
+
+        if (decodedFrame.Width != _displayWidth || decodedFrame.Height != _displayHeight)
+        {
+            _displayWidth = decodedFrame.Width;
+            _displayHeight = decodedFrame.Height;
+
+            Dispatcher.Invoke(() =>
+            {
+                _renderer.Initialize(_displayWidth, _displayHeight);
+                DisplayImage.Source = _renderer.Bitmap;
+                UpdateDisplayImageLayout();
+                StatusText.Text = $"H.264 D3D11 {_displayWidth}x{_displayHeight}";
+                StatusText.Visibility = Visibility.Collapsed;
+            });
+        }
+
+        if (!_renderer.RenderD3D11Frame(decodedFrame))
+            decodedFrame.Release();
     }
 
     private void OnRawFrame(object? sender, RawFramePayload frame)
@@ -603,6 +642,7 @@ public partial class MainWindow : Window
             {
                 _renderer.Initialize(_displayWidth, _displayHeight);
                 DisplayImage.Source = _renderer.Bitmap;
+                UpdateDisplayImageLayout();
                 StatusText.Text = $"RAW {_displayWidth}x{_displayHeight}";
                 StatusText.Visibility = Visibility.Collapsed;
             });
@@ -686,6 +726,88 @@ public partial class MainWindow : Window
     private void OnImageSourceChanged(object? sender, EventArgs e)
     {
         DisplayImage.Source = _renderer.Bitmap;
+        UpdateDisplayImageLayout();
+    }
+
+    private void UpdateDisplayImageLayout()
+    {
+        if (_displayWidth <= 0 || _displayHeight <= 0)
+            return;
+
+        if (!DisplayImage.Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(UpdateDisplayImageLayout);
+            return;
+        }
+
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var hostWidth = DisplayHost.ActualWidth;
+        var hostHeight = DisplayHost.ActualHeight;
+        if (hostWidth <= 0 || hostHeight <= 0)
+            return;
+
+        var hostPhysicalWidth = hostWidth * dpi.DpiScaleX;
+        var hostPhysicalHeight = hostHeight * dpi.DpiScaleY;
+        var scale = Math.Min(hostPhysicalWidth / _displayWidth, hostPhysicalHeight / _displayHeight);
+        if (scale <= 0)
+            return;
+
+        if (scale > 0.995)
+            scale = 1.0;
+
+        var physicalWidth = Math.Max(1, Math.Round(_displayWidth * scale));
+        var physicalHeight = Math.Max(1, Math.Round(_displayHeight * scale));
+        var pixelPerfect = (int)physicalWidth == _displayWidth && (int)physicalHeight == _displayHeight;
+        RenderOptions.SetBitmapScalingMode(
+            DisplayImage,
+            pixelPerfect ? BitmapScalingMode.NearestNeighbor : BitmapScalingMode.HighQuality);
+        DisplayImage.Width = physicalWidth / dpi.DpiScaleX;
+        DisplayImage.Height = physicalHeight / dpi.DpiScaleY;
+        LogDisplayLayoutIfNeeded(
+            hostWidth,
+            hostHeight,
+            dpi.DpiScaleX,
+            dpi.DpiScaleY,
+            hostPhysicalWidth,
+            hostPhysicalHeight,
+            physicalWidth,
+            physicalHeight,
+            scale,
+            pixelPerfect);
+    }
+
+    private void LogDisplayLayoutIfNeeded(
+        double hostWidth,
+        double hostHeight,
+        double dpiScaleX,
+        double dpiScaleY,
+        double hostPhysicalWidth,
+        double hostPhysicalHeight,
+        double physicalWidth,
+        double physicalHeight,
+        double scale,
+        bool pixelPerfect)
+    {
+        var roundedPhysicalWidth = (int)physicalWidth;
+        var roundedPhysicalHeight = (int)physicalHeight;
+        var now = DateTime.UtcNow;
+        var layoutChanged =
+            _lastLayoutPhysicalWidth != roundedPhysicalWidth ||
+            _lastLayoutPhysicalHeight != roundedPhysicalHeight ||
+            _lastLayoutPixelPerfect != pixelPerfect ||
+            Math.Abs(_lastLayoutScale - scale) >= 0.005;
+
+        if (!layoutChanged && (now - _lastLayoutLogTime).TotalSeconds < 5)
+            return;
+
+        _lastLayoutPhysicalWidth = roundedPhysicalWidth;
+        _lastLayoutPhysicalHeight = roundedPhysicalHeight;
+        _lastLayoutScale = scale;
+        _lastLayoutPixelPerfect = pixelPerfect;
+        _lastLayoutLogTime = now;
+
+        DiagLog.Write(
+            $"显示布局: video={_displayWidth}x{_displayHeight}, host={hostWidth:F1}x{hostHeight:F1}dip/{hostPhysicalWidth:F0}x{hostPhysicalHeight:F0}px, dpiScale={dpiScaleX:F2}x{dpiScaleY:F2}, output={roundedPhysicalWidth}x{roundedPhysicalHeight}px, scale={scale * 100:F1}%, pixelPerfect={pixelPerfect}");
     }
 
     protected override void OnClosed(EventArgs e)

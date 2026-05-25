@@ -5,11 +5,14 @@ using System.Runtime.InteropServices;
 using FFmpeg.AutoGen;
 using Microsoft.Extensions.Logging;
 using WiredMonitorClient.Diagnostics;
+using WiredMonitorClient.Video;
 
 namespace WiredMonitorClient.Decoder;
 
 public unsafe class H264Decoder : IDisposable
 {
+    private const int D3D11BindShaderResource = 0x8;
+
     private const int SwsFastBilinear = 1;
 
     private readonly ILogger _logger;
@@ -43,7 +46,9 @@ public unsafe class H264Decoder : IDisposable
     private int _skippedOutputFrames;
 
     public event EventHandler<DecodedFrame>? OnFrameDecoded;
+    public event EventHandler<D3D11DecodedFrame>? OnD3D11FrameDecoded;
     public Func<bool>? ShouldOutputFrame { get; set; }
+    public Func<bool>? ShouldUseD3D11Output { get; set; }
 
     public H264Decoder(ILogger<H264Decoder> logger)
     {
@@ -176,6 +181,7 @@ public unsafe class H264Decoder : IDisposable
             _hwPixelFormat = pixelFormat;
             _codecContext->hw_device_ctx = codecDeviceContext;
             _codecContext->get_format = _getFormatCallback;
+            ConfigureD3D11DirectOutput(deviceType, deviceContext);
 
             _logger.LogInformation("H.264 硬件解码已配置: {DeviceType}, pix_fmt={PixelFormat}", deviceType, pixelFormat);
             DiagLog.Write($"H.264 硬件解码已配置: {deviceType}, pix_fmt={pixelFormat}");
@@ -185,6 +191,20 @@ public unsafe class H264Decoder : IDisposable
         _logger.LogError("没有可用的 H.264 硬件解码器，已拒绝软件解码回退");
         DiagLog.Write("FFmpeg 初始化失败: 没有可用的 H.264 硬件解码器，已拒绝软件解码回退");
         return false;
+    }
+
+    private static void ConfigureD3D11DirectOutput(AVHWDeviceType deviceType, AVBufferRef* deviceContext)
+    {
+        if (deviceType != AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA || deviceContext == null || deviceContext->data == null)
+            return;
+
+        var hwDeviceContext = (AVHWDeviceContext*)deviceContext->data;
+        if (hwDeviceContext->hwctx == null)
+            return;
+
+        var d3d11Context = (AVD3D11VADeviceContext*)hwDeviceContext->hwctx;
+        d3d11Context->BindFlags |= D3D11BindShaderResource;
+        DiagLog.Write($"D3D11VA 直通输出已请求: BindFlags=0x{d3d11Context->BindFlags:x}");
     }
 
     private static AVHWDeviceType[] GetRequestedHardwareDevices()
@@ -298,6 +318,15 @@ public unsafe class H264Decoder : IDisposable
                     }
 
                     var decodeWorkStart = Stopwatch.GetTimestamp();
+                    var d3d11Frame = TryCreateD3D11DecodedFrame(_frame);
+                    if (d3d11Frame != null)
+                    {
+                        RecordDecodeWork(decodeWorkStart);
+                        OnD3D11FrameDecoded?.Invoke(this, d3d11Frame.Value);
+                        ffmpeg.av_frame_unref(_frame);
+                        continue;
+                    }
+
                     var bgraFrame = ConvertFrameToBGRA(_frame);
                     if (bgraFrame != null)
                     {
@@ -346,6 +375,80 @@ public unsafe class H264Decoder : IDisposable
             DiagLog.Write(ex, $"H.264 硬件解码异常, nalBytes={nalData.Length}, key={isKeyFrame}");
             throw;
         }
+    }
+
+    private D3D11DecodedFrame? TryCreateD3D11DecodedFrame(AVFrame* frame)
+    {
+        if (ShouldUseD3D11Output?.Invoke() != true)
+            return null;
+
+        var handler = OnD3D11FrameDecoded;
+        if (handler == null)
+            return null;
+
+        if (_hwDeviceType != AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA
+            || (AVPixelFormat)frame->format != AVPixelFormat.AV_PIX_FMT_D3D11
+            || frame->data[0] == null)
+        {
+            return null;
+        }
+
+        var device = GetD3D11Device();
+        var deviceContext = GetD3D11DeviceContext();
+        if (device == IntPtr.Zero || deviceContext == IntPtr.Zero)
+            return null;
+
+        var retainedFrame = ffmpeg.av_frame_alloc();
+        if (retainedFrame == null)
+            return null;
+
+        var refResult = ffmpeg.av_frame_ref(retainedFrame, frame);
+        if (refResult < 0)
+        {
+            ffmpeg.av_frame_free(&retainedFrame);
+            DiagLog.Write($"D3D11VA 直通帧引用失败: {ErrorToString(refResult)}");
+            return null;
+        }
+
+        var retainedFramePtr = (IntPtr)retainedFrame;
+        return new D3D11DecodedFrame(
+            device,
+            deviceContext,
+            (IntPtr)frame->data[0],
+            unchecked((int)(nuint)frame->data[1]),
+            frame->width,
+            frame->height,
+            () => ReleaseRetainedFrame(retainedFramePtr));
+    }
+
+    private IntPtr GetD3D11Device()
+    {
+        var deviceContext = GetD3D11VADeviceContext();
+        return deviceContext == null ? IntPtr.Zero : (IntPtr)deviceContext->device;
+    }
+
+    private IntPtr GetD3D11DeviceContext()
+    {
+        var deviceContext = GetD3D11VADeviceContext();
+        return deviceContext == null ? IntPtr.Zero : (IntPtr)deviceContext->device_context;
+    }
+
+    private AVD3D11VADeviceContext* GetD3D11VADeviceContext()
+    {
+        if (_hwDeviceContext == null || _hwDeviceContext->data == null)
+            return null;
+
+        var hwDeviceContext = (AVHWDeviceContext*)_hwDeviceContext->data;
+        return hwDeviceContext->hwctx == null
+            ? null
+            : (AVD3D11VADeviceContext*)hwDeviceContext->hwctx;
+    }
+
+    private static void ReleaseRetainedFrame(IntPtr framePtr)
+    {
+        var frame = (AVFrame*)framePtr;
+        if (frame != null)
+            ffmpeg.av_frame_free(&frame);
     }
 
     private BgraFrameBuffer? ConvertFrameToBGRA(AVFrame* frame)

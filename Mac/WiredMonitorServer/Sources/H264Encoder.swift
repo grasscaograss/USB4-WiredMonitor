@@ -47,7 +47,7 @@ class H264Encoder {
            parsed > 0 {
             bitRate = parsed
         } else {
-            bitRate = 60_000_000
+            bitRate = Self.defaultBitRate(width: Int32(width), height: Int32(height), fps: fps)
         }
 
         let env = ProcessInfo.processInfo.environment
@@ -74,7 +74,7 @@ class H264Encoder {
            parsed <= 1 {
             quality = parsed
         } else {
-            quality = 0.88
+            quality = 1.0
         }
     }
 
@@ -132,7 +132,7 @@ class H264Encoder {
 
         // DataRateLimits: [bytes, seconds]
         let dataRateLimits = [
-            NSNumber(value: (bitRate * 2) / 8),
+            NSNumber(value: (bitRate * 3) / 8),
             NSNumber(value: 1),
         ] as CFArray
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: dataRateLimits)
@@ -178,6 +178,23 @@ class H264Encoder {
         default:
             return ("high", kVTProfileLevel_H264_High_AutoLevel)
         }
+    }
+
+    private static func defaultBitRate(width: Int32, height: Int32, fps: Int) -> Int {
+        let env = ProcessInfo.processInfo.environment
+        let bitsPerPixelFrame: Double
+        if let value = env["WIRED_MONITOR_BITRATE_BPP"],
+           let parsed = Double(value),
+           parsed > 0,
+           parsed <= 1 {
+            bitsPerPixelFrame = parsed
+        } else {
+            bitsPerPixelFrame = 0.26
+        }
+
+        let pixelRate = Double(width) * Double(height) * Double(max(fps, 1))
+        let calculated = Int(pixelRate * bitsPerPixelFrame)
+        return min(max(calculated, 60_000_000), 220_000_000)
     }
 
     func encode(pixelBuffer: CVPixelBuffer, timestamp: UInt64) {

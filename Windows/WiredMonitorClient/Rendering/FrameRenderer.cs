@@ -6,6 +6,7 @@ using System.Windows.Threading;
 using Microsoft.Extensions.Logging;
 using WiredMonitorClient.Diagnostics;
 using WiredMonitorClient.Protocol;
+using WiredMonitorClient.Video;
 
 namespace WiredMonitorClient.Rendering;
 
@@ -26,9 +27,13 @@ public class FrameRenderer
     private long _d3dUploadTicks;
     private long _d3dUpdateSurfaceTicks;
     private long _d3dDirtyTicks;
+    private long _d3d11SrvTicks;
+    private long _d3d11DrawTicks;
     private int _renderFrames;
     private int _replacedPendingFrames;
     private string _rendererName = "none";
+    private bool _d3d11DirectDisabled;
+    private bool _d3d11DirectFailureLogged;
 
     public ImageSource? Bitmap => (ImageSource?)_d3dPresenter?.Image ?? _bitmap;
 
@@ -60,6 +65,8 @@ public class FrameRenderer
         _d3dPresenter?.Dispose();
         _d3dPresenter = null;
         _bitmap = null;
+        _d3d11DirectDisabled = false;
+        _d3d11DirectFailureLogged = false;
 
         if (ShouldUseD3DImage())
         {
@@ -114,6 +121,17 @@ public class FrameRenderer
         QueueLatestFrame(new PendingFrame(data, 0, length, _stride, FlipVertical: false, frame.ReturnBuffer));
     }
 
+    public bool CanUseD3D11Direct => _d3dPresenter != null && !_d3d11DirectDisabled && ShouldUseD3D11Direct();
+
+    public bool RenderD3D11Frame(D3D11DecodedFrame frame)
+    {
+        if (!CanUseD3D11Direct)
+            return false;
+
+        QueueLatestFrame(PendingFrame.FromD3D11(frame));
+        return true;
+    }
+
     private static bool TryGetArray(ReadOnlyMemory<byte> memory, out byte[] data, out int offset)
     {
         if (System.Runtime.InteropServices.MemoryMarshal.TryGetArray(memory, out var segment)
@@ -148,7 +166,7 @@ public class FrameRenderer
             }
         }
 
-        replacedFrame?.ReturnBuffer?.Invoke(replacedFrame.Data);
+        replacedFrame?.Release();
 
         if (shouldSchedule)
             Application.Current.Dispatcher.BeginInvoke(RenderPendingFrame, DispatcherPriority.Render);
@@ -171,7 +189,7 @@ public class FrameRenderer
             }
             finally
             {
-                frame.ReturnBuffer?.Invoke(frame.Data);
+                frame.Release();
             }
         }
 
@@ -195,6 +213,12 @@ public class FrameRenderer
     private void WriteFrame(PendingFrame frame)
     {
         if (_bitmap == null && _d3dPresenter == null) return;
+
+        if (frame.D3D11Frame != null)
+        {
+            WriteD3D11Frame(frame.D3D11Frame.Value);
+            return;
+        }
 
         var copyLen = Math.Min(frame.Length, Math.Min(frame.Data.Length - frame.Offset, _stride * _height));
         if (copyLen <= 0) return;
@@ -258,6 +282,27 @@ public class FrameRenderer
         RecordRenderWork(renderStart);
     }
 
+    private void WriteD3D11Frame(D3D11DecodedFrame frame)
+    {
+        if (_d3dPresenter == null || _d3d11DirectDisabled)
+            return;
+
+        var renderStart = Stopwatch.GetTimestamp();
+        if (_d3dPresenter.PresentD3D11Frame(frame, out var metrics))
+        {
+            OnFrameRendered?.Invoke(this, EventArgs.Empty);
+            RecordD3D11RenderWork(renderStart, metrics);
+            return;
+        }
+
+        _d3d11DirectDisabled = true;
+        if (!_d3d11DirectFailureLogged)
+        {
+            _d3d11DirectFailureLogged = true;
+            DiagLog.Write("D3D11直通渲染失败，后续帧回退到硬解下载 BGRA 路径");
+        }
+    }
+
     private void RecordRenderWork(long startTimestamp, D3DImagePresentMetrics presentMetrics = default)
     {
         _renderTicks += Stopwatch.GetTimestamp() - startTimestamp;
@@ -283,6 +328,8 @@ public class FrameRenderer
         _d3dUploadTicks = 0;
         _d3dUpdateSurfaceTicks = 0;
         _d3dDirtyTicks = 0;
+        _d3d11SrvTicks = 0;
+        _d3d11DrawTicks = 0;
         _renderFrames = 0;
         _replacedPendingFrames = 0;
         _lastRenderReportTime = now;
@@ -296,6 +343,39 @@ public class FrameRenderer
         DiagLog.Write($"显示渲染处理: renderer={renderer}, frames={frames}, avg={avgMs:F1}ms, replaced={replaced}");
     }
 
+    private void RecordD3D11RenderWork(long startTimestamp, D3D11DirectPresentMetrics presentMetrics)
+    {
+        _renderTicks += Stopwatch.GetTimestamp() - startTimestamp;
+        _d3d11SrvTicks += presentMetrics.SrvTicks;
+        _d3d11DrawTicks += presentMetrics.DrawTicks;
+        _d3dDirtyTicks += presentMetrics.DirtyTicks;
+        _renderFrames++;
+
+        var now = DateTime.UtcNow;
+        if ((now - _lastRenderReportTime).TotalSeconds < 2.0)
+            return;
+
+        var frameCount = Math.Max(1, _renderFrames);
+        var avgMs = TicksToAverageMs(_renderTicks, frameCount);
+        var srvMs = TicksToAverageMs(_d3d11SrvTicks, frameCount);
+        var drawMs = TicksToAverageMs(_d3d11DrawTicks, frameCount);
+        var dirtyMs = TicksToAverageMs(_d3dDirtyTicks, frameCount);
+        var otherMs = Math.Max(0, avgMs - srvMs - drawMs - dirtyMs);
+        var frames = _renderFrames;
+        var replaced = _replacedPendingFrames;
+        _renderTicks = 0;
+        _d3dUploadTicks = 0;
+        _d3dUpdateSurfaceTicks = 0;
+        _d3dDirtyTicks = 0;
+        _d3d11SrvTicks = 0;
+        _d3d11DrawTicks = 0;
+        _renderFrames = 0;
+        _replacedPendingFrames = 0;
+        _lastRenderReportTime = now;
+
+        DiagLog.Write($"显示渲染处理: renderer=D3D11Direct, frames={frames}, avg={avgMs:F1}ms, srv={srvMs:F1}ms, draw={drawMs:F1}ms, dirty={dirtyMs:F1}ms, other={otherMs:F1}ms, replaced={replaced}");
+    }
+
     private static double TicksToAverageMs(long ticks, int frames) =>
         ticks * 1000.0 / Stopwatch.Frequency / Math.Max(1, frames);
 
@@ -306,6 +386,13 @@ public class FrameRenderer
             && !string.Equals(renderer, "writeablebitmap", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool ShouldUseD3D11Direct()
+    {
+        var value = Environment.GetEnvironmentVariable("WIRED_MONITOR_D3D11_DIRECT");
+        return !string.Equals(value, "0", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase);
+    }
+
     public void Dispose()
     {
         _d3dPresenter?.Dispose();
@@ -314,7 +401,29 @@ public class FrameRenderer
         _rendererName = "none";
     }
 
-    private sealed record PendingFrame(byte[] Data, int Offset, int Length, int SourceStride, bool FlipVertical, Action<byte[]>? ReturnBuffer);
+    private sealed record PendingFrame(
+        byte[] Data,
+        int Offset,
+        int Length,
+        int SourceStride,
+        bool FlipVertical,
+        Action<byte[]>? ReturnBuffer,
+        D3D11DecodedFrame? D3D11Frame = null)
+    {
+        public static PendingFrame FromD3D11(D3D11DecodedFrame frame) =>
+            new(Array.Empty<byte>(), 0, 0, 0, FlipVertical: false, ReturnBuffer: null, frame);
+
+        public void Release()
+        {
+            if (D3D11Frame != null)
+            {
+                D3D11Frame.Value.Release();
+                return;
+            }
+
+            ReturnBuffer?.Invoke(Data);
+        }
+    }
 }
 
 public readonly struct DecodedFrameData

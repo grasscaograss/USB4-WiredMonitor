@@ -58,9 +58,12 @@
         <Grid x:Name="DisplayHost" Grid.Row="1" Background="#FF000000"
               UseLayoutRounding="True"
               SnapsToDevicePixels="True">
-            <Image x:Name="DisplayImage" Stretch="Uniform"
+            <Image x:Name="DisplayImage"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center"
+                   Stretch="Uniform"
                    SnapsToDevicePixels="True"
-                   RenderOptions.BitmapScalingMode="NearestNeighbor"/>
+                   RenderOptions.BitmapScalingMode="HighQuality"/>
             <Canvas x:Name="CursorOverlay" IsHitTestVisible="False">
                 <Path x:Name="RemoteCursor"
                       Visibility="Collapsed"
