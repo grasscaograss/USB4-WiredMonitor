@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Microsoft.Extensions.Logging;
 using WiredMonitorClient.Decoder;
 using WiredMonitorClient.Diagnostics;
@@ -28,12 +29,14 @@ public partial class MainWindow : Window
     private const int ResumeQueueLatencyMs = 70;
     private const int MaxQueuedFramesForOutput = 1;
     private const long MacAbsoluteEpochOffsetMs = 978_307_200_000;
+    private static readonly TimeSpan LocalCursorIdleTimeout = TimeSpan.FromSeconds(5);
 
     private readonly ILogger _logger;
     private readonly FrameReceiver _receiver;
     private readonly FrameRenderer _renderer;
     private readonly ILoggerFactory _loggerFactory;
     private readonly IntPtr _windowHandle;
+    private readonly DispatcherTimer _localCursorIdleTimer;
     private H264Decoder? _h264Decoder;
     private readonly ConcurrentQueue<QueuedH264Frame> _h264Queue = new();
     private readonly SemaphoreSlim _h264Signal = new(0);
@@ -79,6 +82,9 @@ public partial class MainWindow : Window
     private bool _lastLayoutPixelPerfect;
     private DateTime _lastLayoutLogTime = DateTime.MinValue;
     private CancellationTokenSource? _usb4IpDetectionCts;
+    private bool _isLocalCursorOverDisplay;
+    private bool _isLocalCursorHidden;
+    private Point? _lastLocalCursorPosition;
 
     public MainWindow()
     {
@@ -107,6 +113,15 @@ public partial class MainWindow : Window
         _renderer.OnImageSourceChanged += OnImageSourceChanged;
         DisplayHost.SizeChanged += (_, _) => UpdateDisplayImageLayout();
         Loaded += (_, _) => StartUsb4IpAutoDetection();
+
+        _localCursorIdleTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = LocalCursorIdleTimeout
+        };
+        _localCursorIdleTimer.Tick += (_, _) => HideLocalCursorIfIdle();
+        DisplayHost.MouseEnter += OnDisplayHostMouseEnter;
+        DisplayHost.MouseMove += OnDisplayHostMouseMove;
+        DisplayHost.MouseLeave += OnDisplayHostMouseLeave;
     }
 
     private async void ConnectButton_Click(object sender, RoutedEventArgs e)
@@ -212,6 +227,62 @@ public partial class MainWindow : Window
             FullscreenButton.Content = "退出全屏";
             _isFullscreen = true;
         }
+    }
+
+    private void OnDisplayHostMouseEnter(object sender, MouseEventArgs e)
+    {
+        _isLocalCursorOverDisplay = true;
+        ShowLocalCursor();
+        RestartLocalCursorIdleTimer(e.GetPosition(DisplayHost));
+    }
+
+    private void OnDisplayHostMouseMove(object sender, MouseEventArgs e)
+    {
+        var position = e.GetPosition(DisplayHost);
+        if (!_isLocalCursorHidden && _lastLocalCursorPosition is { } last &&
+            Math.Abs(position.X - last.X) < 0.5 &&
+            Math.Abs(position.Y - last.Y) < 0.5)
+        {
+            return;
+        }
+
+        _isLocalCursorOverDisplay = true;
+        ShowLocalCursor();
+        RestartLocalCursorIdleTimer(position);
+    }
+
+    private void OnDisplayHostMouseLeave(object sender, MouseEventArgs e)
+    {
+        _isLocalCursorOverDisplay = false;
+        _lastLocalCursorPosition = null;
+        _localCursorIdleTimer.Stop();
+        ShowLocalCursor();
+    }
+
+    private void RestartLocalCursorIdleTimer(Point position)
+    {
+        _lastLocalCursorPosition = position;
+        _localCursorIdleTimer.Stop();
+        _localCursorIdleTimer.Start();
+    }
+
+    private void HideLocalCursorIfIdle()
+    {
+        _localCursorIdleTimer.Stop();
+        if (!_isLocalCursorOverDisplay)
+            return;
+
+        DisplayHost.Cursor = Cursors.None;
+        _isLocalCursorHidden = true;
+    }
+
+    private void ShowLocalCursor()
+    {
+        if (!_isLocalCursorHidden)
+            return;
+
+        DisplayHost.Cursor = null;
+        _isLocalCursorHidden = false;
     }
 
     private void OnConnectionChanged(object? sender, bool connected)
@@ -1038,6 +1109,8 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        _localCursorIdleTimer.Stop();
+        ShowLocalCursor();
         _usb4IpDetectionCts?.Cancel();
         _decodeCts?.Cancel();
         _h264Signal.Release();
