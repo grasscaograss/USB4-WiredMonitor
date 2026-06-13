@@ -18,7 +18,7 @@ namespace WiredMonitorClient;
 
 public partial class MainWindow : Window
 {
-    private readonly record struct QueuedH264Frame(FramePayload Payload, bool SuppressOutput);
+    private readonly record struct QueuedH264Frame(FramePayload Payload, VideoDecoderCodec Codec, bool SuppressOutput);
 
     private const int ReceiveBackpressureHighWatermark = 6;
     private const int ReceiveBackpressureLowWatermark = 2;
@@ -66,11 +66,19 @@ public partial class MainWindow : Window
     private WindowState _previousWindowState = WindowState.Normal;
     private WindowStyle _previousWindowStyle = WindowStyle.SingleBorderWindow;
     private ResizeMode _previousResizeMode = ResizeMode.CanResize;
+    private VideoDecoderCodec _decoderCodec = VideoDecoderCodec.H264;
+    private bool _manualDisconnectRequested;
+    private string? _lastHost;
+    private int _lastPort;
+    private ClientDisplayInfo? _lastDisplayInfo;
+    private CancellationTokenSource? _autoReconnectCts;
+    private int _autoReconnectAttempt;
     private int _lastLayoutPhysicalWidth;
     private int _lastLayoutPhysicalHeight;
     private double _lastLayoutScale;
     private bool _lastLayoutPixelPerfect;
     private DateTime _lastLayoutLogTime = DateTime.MinValue;
+    private CancellationTokenSource? _usb4IpDetectionCts;
 
     public MainWindow()
     {
@@ -88,7 +96,8 @@ public partial class MainWindow : Window
         _receiver = new FrameReceiver();
         _renderer = new FrameRenderer(_loggerFactory.CreateLogger<FrameRenderer>(), _windowHandle);
 
-        _receiver.OnH264Frame += OnH264Frame;
+        _receiver.OnH264Frame += (_, frame) => OnCompressedFrame(frame, VideoDecoderCodec.H264);
+        _receiver.OnHevcFrame += (_, frame) => OnCompressedFrame(frame, VideoDecoderCodec.Hevc);
         _receiver.OnRawFrame += OnRawFrame;
         _receiver.OnCursorPosition += OnCursorPosition;
         _receiver.OnConnectionChanged += OnConnectionChanged;
@@ -97,23 +106,37 @@ public partial class MainWindow : Window
         _renderer.OnFrameRendered += OnFrameRendered;
         _renderer.OnImageSourceChanged += OnImageSourceChanged;
         DisplayHost.SizeChanged += (_, _) => UpdateDisplayImageLayout();
+        Loaded += (_, _) => StartUsb4IpAutoDetection();
     }
 
     private async void ConnectButton_Click(object sender, RoutedEventArgs e)
     {
         var host = HostTextBox.Text.Trim();
-        var port = int.Parse(PortTextBox.Text.Trim());
+        var port = ParsePortOrDefault();
 
         Console.WriteLine($"[UI] 连接按钮点击: {host}:{port}");
         DiagLog.Write($"UI 请求连接: {host}:{port}");
+        _manualDisconnectRequested = false;
+        _autoReconnectCts?.Cancel();
         ConnectButton.IsEnabled = false;
         StatusText.Text = $"正在连接 {host}:{port}...";
 
         try
         {
+            if (string.IsNullOrWhiteSpace(host))
+            {
+                StatusText.Text = "正在检测 Mac USB4 IP...";
+                var detected = await Usb4IpDetector.DetectAsync(port);
+                if (detected == null)
+                    throw new InvalidOperationException("没有检测到 Mac USB4 IP");
+
+                ApplyDetectedUsb4Ip(detected);
+                host = detected.Host;
+            }
+
             var displayInfo = WindowsDisplayInfo.FromWindow(this);
             DiagLog.Write($"连接使用显示器信息: {displayInfo.Width}x{displayInfo.Height}@{displayInfo.RefreshRate}, dpi={displayInfo.Dpi}");
-            await _receiver.ConnectAsync(host, port, displayInfo);
+            await ConnectToServerAsync(host, port, displayInfo, isAutoReconnect: false);
             Console.WriteLine("[UI] ConnectAsync 返回成功");
         }
         catch (Exception ex)
@@ -128,7 +151,20 @@ public partial class MainWindow : Window
 
     private void DisconnectButton_Click(object sender, RoutedEventArgs e)
     {
+        _manualDisconnectRequested = true;
+        _autoReconnectCts?.Cancel();
         _receiver.Disconnect();
+    }
+
+    private async Task ConnectToServerAsync(string host, int port, ClientDisplayInfo displayInfo, bool isAutoReconnect)
+    {
+        _lastHost = host;
+        _lastPort = port;
+        _lastDisplayInfo = displayInfo;
+        if (isAutoReconnect)
+            DiagLog.Write($"自动重连开始: {host}:{port}, {displayInfo.Width}x{displayInfo.Height}@{displayInfo.RefreshRate}, dpi={displayInfo.Dpi}");
+
+        await _receiver.ConnectAsync(host, port, displayInfo);
     }
 
     private void FullscreenButton_Click(object sender, RoutedEventArgs e)
@@ -186,6 +222,9 @@ public partial class MainWindow : Window
         {
             if (connected)
             {
+                _autoReconnectCts?.Cancel();
+                _autoReconnectAttempt = 0;
+                _manualDisconnectRequested = false;
                 StatusDot.Fill = System.Windows.Media.Brushes.LimeGreen;
                 ConnectionStatus.Text = "已连接";
                 StatusText.Text = "等待画面数据...";
@@ -213,6 +252,7 @@ public partial class MainWindow : Window
                 _decodeCts?.Cancel();
                 _decodeCts = new CancellationTokenSource();
                 _decodeTask = Task.Run(() => DecodeLoop(_decodeCts.Token));
+                _decoderCodec = VideoDecoderCodec.H264;
                 _lastReceiveStatusUpdate = DateTime.MinValue;
                 _lastReceiveError = null;
                 StatusText.Visibility = Visibility.Visible;
@@ -239,17 +279,190 @@ public partial class MainWindow : Window
                 _h264Decoder = null;
             }
         });
+
+        if (!connected && !_manualDisconnectRequested)
+            ScheduleAutoReconnect();
     }
 
-    private void OnH264Frame(object? sender, FramePayload frame)
+    private void ScheduleAutoReconnect()
+    {
+        if (_manualDisconnectRequested || string.IsNullOrWhiteSpace(_lastHost) || _lastPort <= 0)
+            return;
+
+        _autoReconnectCts?.Cancel();
+        var reconnectCts = new CancellationTokenSource();
+        _autoReconnectCts = reconnectCts;
+        var token = reconnectCts.Token;
+        var attempt = Math.Min(Interlocked.Increment(ref _autoReconnectAttempt), 10);
+        var delayMs = Math.Min(5000, 500 * attempt);
+        var host = _lastHost;
+        var port = _lastPort;
+
+        DiagLog.Write($"自动重连已安排: {delayMs}ms 后尝试 #{attempt}, {host}:{port}");
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delayMs, token);
+                if (token.IsCancellationRequested || _manualDisconnectRequested)
+                    return;
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    StatusText.Text = $"连接中断，正在自动重连 #{attempt}...";
+                    StatusText.Visibility = Visibility.Visible;
+                    StatusText.Foreground = System.Windows.Media.Brushes.White;
+                    ConnectButton.IsEnabled = false;
+                    DisconnectButton.IsEnabled = false;
+                });
+
+                var reconnectTarget = await Dispatcher.InvokeAsync(() =>
+                {
+                    var uiHost = HostTextBox.Text.Trim();
+                    var uiPort = ParsePortOrDefault();
+                    return (
+                        Host: string.IsNullOrWhiteSpace(uiHost) ? host : uiHost,
+                        Port: uiPort > 0 ? uiPort : port,
+                        DisplayInfo: WindowsDisplayInfo.FromWindow(this));
+                });
+                await ConnectToServerAsync(
+                    reconnectTarget.Host,
+                    reconnectTarget.Port,
+                    reconnectTarget.DisplayInfo,
+                    isAutoReconnect: true);
+                DiagLog.Write($"自动重连成功: attempt={attempt}");
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                DiagLog.Write(ex, $"自动重连失败: attempt={attempt}");
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    StatusText.Text = $"自动重连失败，继续重试: {ex.Message}";
+                    StatusText.Visibility = Visibility.Visible;
+                    StatusText.Foreground = System.Windows.Media.Brushes.Orange;
+                    ConnectButton.IsEnabled = true;
+                    DisconnectButton.IsEnabled = false;
+                });
+
+                if (!token.IsCancellationRequested && !_manualDisconnectRequested)
+                    ScheduleAutoReconnect();
+            }
+        }, token);
+    }
+
+    private void StartUsb4IpAutoDetection()
+    {
+        _usb4IpDetectionCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _usb4IpDetectionCts = cts;
+        _ = Task.Run(() => Usb4IpDetectionLoop(cts.Token), cts.Token);
+    }
+
+    private async Task Usb4IpDetectionLoop(CancellationToken ct)
+    {
+        try
+        {
+            await Task.Delay(500, ct);
+
+            while (!ct.IsCancellationRequested)
+            {
+                if (_receiver.IsConnected)
+                {
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        Usb4IpStatusText.Text = $"USB4IP: {HostTextBox.Text.Trim()}";
+                        Usb4IpStatusText.Foreground = Brushes.LimeGreen;
+                    });
+                    await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                    continue;
+                }
+
+                var target = await Dispatcher.InvokeAsync(() => (
+                    CurrentHost: HostTextBox.Text.Trim(),
+                    Port: ParsePortOrDefault()));
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    Usb4IpStatusText.Text = "USB4IP: 检测中";
+                    Usb4IpStatusText.Foreground = Brushes.LightGray;
+                });
+
+                var result = await Usb4IpDetector.DetectAsync(target.Port, target.CurrentHost, ct);
+                if (result != null)
+                {
+                    await Dispatcher.InvokeAsync(() => ApplyDetectedUsb4Ip(result));
+                    await Task.Delay(TimeSpan.FromSeconds(30), ct);
+                }
+                else
+                {
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        Usb4IpStatusText.Text = "USB4IP: 未找到";
+                        Usb4IpStatusText.Foreground = Brushes.Orange;
+                    });
+                    await Task.Delay(TimeSpan.FromSeconds(8), ct);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write(ex, "USB4IP 自动检测异常");
+            await Dispatcher.InvokeAsync(() =>
+            {
+                Usb4IpStatusText.Text = "USB4IP: 检测异常";
+                Usb4IpStatusText.Foreground = Brushes.Orange;
+            });
+        }
+    }
+
+    private void ApplyDetectedUsb4Ip(Usb4IpDetectionResult result)
+    {
+        _lastHost = result.Host;
+        _lastPort = result.Port;
+
+        Usb4IpStatusText.Text = $"USB4IP: {result.Host}";
+        Usb4IpStatusText.Foreground = Brushes.LimeGreen;
+
+        if (!_receiver.IsConnected &&
+            !HostTextBox.IsKeyboardFocusWithin &&
+            !string.Equals(HostTextBox.Text.Trim(), result.Host, StringComparison.OrdinalIgnoreCase))
+        {
+            HostTextBox.Text = result.Host;
+            DiagLog.Write(
+                $"USB4IP 自动更新界面地址: {result.Host}, local={result.LocalAddress}, iface={result.InterfaceName}");
+        }
+
+        if (!_receiver.IsConnected && StatusText.Visibility == Visibility.Visible)
+        {
+            StatusText.Text = $"检测到 Mac USB4 IP: {result.Host}";
+            StatusText.Foreground = Brushes.White;
+        }
+    }
+
+    private int ParsePortOrDefault()
+    {
+        return int.TryParse(PortTextBox.Text.Trim(), out var port) && port > 0 && port <= 65535
+            ? port
+            : ProtocolConstants.VideoPort;
+    }
+
+    private void OnCompressedFrame(FramePayload frame, VideoDecoderCodec codec)
     {
         _frameCount++;
         _totalBytes += frame.Data.Length;
+        var codecName = codec == VideoDecoderCodec.Hevc ? "HEVC" : "H264";
         if (_initialH264FrameLogs < 3 || frame.IsKeyFrame)
         {
             if (!frame.IsKeyFrame)
                 _initialH264FrameLogs++;
-            DiagLog.Write($"H264帧: idx={frame.FrameIndex}, key={frame.IsKeyFrame}, size={frame.Width}x{frame.Height}, bytes={frame.Data.Length}");
+            DiagLog.Write($"{codecName}帧: idx={frame.FrameIndex}, key={frame.IsKeyFrame}, size={frame.Width}x{frame.Height}, bytes={frame.Data.Length}");
         }
 
         var now = DateTime.UtcNow;
@@ -259,8 +472,8 @@ public partial class MainWindow : Window
             Dispatcher.Invoke(() =>
             {
                 StatusText.Text = frame.IsKeyFrame
-                    ? $"收到 H.264 关键帧 #{frame.FrameIndex}，正在解码..."
-                    : $"收到 H.264 帧 #{frame.FrameIndex}，等待解码输出...";
+                    ? $"收到 {codecName} 关键帧 #{frame.FrameIndex}，正在解码..."
+                    : $"收到 {codecName} 帧 #{frame.FrameIndex}，等待解码输出...";
                 StatusText.Foreground = System.Windows.Media.Brushes.White;
             });
         }
@@ -308,10 +521,10 @@ public partial class MainWindow : Window
         }
         else if (_suppressOutputUntilLowLatency)
         {
-            if (queueLatencyMs <= ResumeQueueLatencyMs)
+            if (queueLatencyMs <= ResumeQueueLatencyMs || queuedFrames <= MaxQueuedFramesForOutput)
             {
                 _suppressOutputUntilLowLatency = false;
-                DiagLog.Write($"追帧预热完成，恢复输出 lag={queueLatencyMs}ms, key={frame.IsKeyFrame}, idx={frame.FrameIndex}");
+                DiagLog.Write($"追帧预热完成，恢复输出 queued={queuedFrames}, lag={queueLatencyMs}ms, key={frame.IsKeyFrame}, idx={frame.FrameIndex}");
             }
             else
             {
@@ -349,7 +562,7 @@ public partial class MainWindow : Window
             if (suppressOutput)
                 DiagLog.Write($"从过期关键帧预热解码器 lag={queueLatencyMs}ms, idx={frame.FrameIndex}");
         }
-        else if (queueLatencyMs > MaxQueueLatencyMs)
+        else if (queuedFrames > MaxQueuedFramesForOutput && queueLatencyMs > MaxQueueLatencyMs)
         {
             DiagLog.Write($"H264 延迟过高，软追帧跳过过期输出 queued={queuedFrames}, lag={queueLatencyMs}ms, currentKey={frame.IsKeyFrame}, idx={frame.FrameIndex}");
             _lastCatchUpTime = now;
@@ -357,13 +570,13 @@ public partial class MainWindow : Window
             suppressOutput = true;
         }
 
-        EnqueueH264Frame(frame, suppressOutput);
+        EnqueueH264Frame(frame, codec, suppressOutput);
         ApplyReceiveBackpressureIfNeeded();
     }
 
-    private void EnqueueH264Frame(FramePayload frame, bool suppressOutput)
+    private void EnqueueH264Frame(FramePayload frame, VideoDecoderCodec codec, bool suppressOutput)
     {
-        _h264Queue.Enqueue(new QueuedH264Frame(frame, suppressOutput));
+        _h264Queue.Enqueue(new QueuedH264Frame(frame, codec, suppressOutput));
         Interlocked.Increment(ref _queuedH264Frames);
         _h264Signal.Release();
     }
@@ -432,6 +645,7 @@ public partial class MainWindow : Window
     private void DecodeH264Frame(QueuedH264Frame queuedFrame)
     {
         var frame = queuedFrame.Payload;
+        var codec = queuedFrame.Codec;
         if (_resetDecoderOnNextKeyFrame)
         {
             if (!frame.IsKeyFrame)
@@ -446,9 +660,21 @@ public partial class MainWindow : Window
             DiagLog.Write($"重置解码器并从关键帧恢复 idx={frame.FrameIndex}");
         }
 
+        if (_h264Decoder != null && _decoderCodec != codec)
+        {
+            if (!frame.IsKeyFrame)
+                return;
+
+            _h264Decoder.Dispose();
+            _h264Decoder = null;
+            _decoderFailed = false;
+            DiagLog.Write($"切换视频解码器: {_decoderCodec} -> {codec}, idx={frame.FrameIndex}");
+        }
+
         if (_h264Decoder == null)
         {
-            _h264Decoder = new H264Decoder(_loggerFactory.CreateLogger<H264Decoder>());
+            _decoderCodec = codec;
+            _h264Decoder = new H264Decoder(_loggerFactory.CreateLogger<H264Decoder>(), codec);
             var decoderWidth = frame.Width > 0 ? frame.Width : 1920;
             var decoderHeight = frame.Height > 0 ? frame.Height : 1080;
 
@@ -475,11 +701,11 @@ public partial class MainWindow : Window
                     _h264Decoder.Dispose();
                     _h264Decoder = null;
                     _decoderFailed = true;
-                    Dispatcher.Invoke(() =>
-                    {
-                        StatusText.Text = "硬件解码器初始化失败 - 需要支持 D3D11VA/DXVA2 的 GPU 和 FFmpeg 库";
-                        StatusText.Foreground = System.Windows.Media.Brushes.Orange;
-                    });
+                Dispatcher.Invoke(() =>
+                {
+                    StatusText.Text = $"{codec} 硬件解码器初始化失败 - 需要支持 D3D11VA/DXVA2 的 GPU 和 FFmpeg 库";
+                    StatusText.Foreground = System.Windows.Media.Brushes.Orange;
+                });
                 }
             }
             catch (Exception ex)
@@ -554,7 +780,7 @@ public partial class MainWindow : Window
                 _renderer.Initialize(_displayWidth, _displayHeight);
                 DisplayImage.Source = _renderer.Bitmap;
                 UpdateDisplayImageLayout();
-                StatusText.Text = $"H.264 {_displayWidth}x{_displayHeight}";
+                StatusText.Text = $"{_decoderCodec} {_displayWidth}x{_displayHeight}";
                 StatusText.Visibility = Visibility.Collapsed;
             });
         }
@@ -583,7 +809,7 @@ public partial class MainWindow : Window
                 _renderer.Initialize(_displayWidth, _displayHeight);
                 DisplayImage.Source = _renderer.Bitmap;
                 UpdateDisplayImageLayout();
-                StatusText.Text = $"H.264 D3D11 {_displayWidth}x{_displayHeight}";
+                StatusText.Text = $"{_decoderCodec} D3D11 {_displayWidth}x{_displayHeight}";
                 StatusText.Visibility = Visibility.Collapsed;
             });
         }
@@ -812,6 +1038,7 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        _usb4IpDetectionCts?.Cancel();
         _decodeCts?.Cancel();
         _h264Signal.Release();
         _receiver.Disconnect();

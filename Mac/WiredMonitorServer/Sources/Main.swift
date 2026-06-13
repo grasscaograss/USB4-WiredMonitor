@@ -138,10 +138,14 @@ struct WiredMonitorServer {
         let runtime: StreamRuntime
 
         if !forceRaw && encoder.start() {
-            print("[主] H.264 编码模式")
+            print("[主] \(encoder.codecName) 编码模式")
             startH264Mode(capture: capture, encoder: encoder, server: server, width: width, height: height, fps: streamFps)
             runtime = StreamRuntime(capture: capture, encoder: encoder, cursorTracker: cursorTracker, virtualDisplay: virtualDisplay)
         } else {
+            if !forceRaw && !encoder.usesDefaultCodec && ProcessInfo.processInfo.environment["WIRED_MONITOR_ALLOW_RAW_FALLBACK"] != "1" {
+                print("[主] \(encoder.codecName) 编码器启动失败，已停止；如需回退 RAW，设置 WIRED_MONITOR_ALLOW_RAW_FALLBACK=1")
+                return nil
+            }
             print(forceRaw ? "[主] 已强制使用 RAW 模式" : "[主] H.264 编码器启动失败，使用 RAW 模式")
             startRawMode(capture: capture, server: server, width: width, height: height, fps: streamFps)
             runtime = StreamRuntime(capture: capture, encoder: nil, cursorTracker: cursorTracker, virtualDisplay: virtualDisplay)
@@ -339,7 +343,7 @@ struct WiredMonitorServer {
             payload.append(Data(bytes: &h, count: 4))
             payload.append(nalData)
 
-            server.sendFrame(data: payload, packetType: .frameH264, cacheForNewClients: isKeyFrame)
+            server.sendFrame(data: payload, packetType: encoder.packetType, cacheForNewClients: isKeyFrame)
 
             let now = Date()
             if now.timeIntervalSince(lastReportTime) >= 1.0 {

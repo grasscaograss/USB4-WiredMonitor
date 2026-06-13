@@ -35,6 +35,7 @@ Total header: 10 bytes
 | FRAME_REQUEST | 0x0020 | C→S | 请求视频帧 |
 | FRAME_H264 | 0x0030 | S→C | H.264 编码帧 |
 | FRAME_RAW | 0x0031 | S→C | 原始 BGRA 帧 |
+| FRAME_HEVC | 0x0032 | S→C | HEVC/H.265 编码帧 |
 | INPUT_EVENT | 0x0040 | C→S | 鼠标/键盘输入事件 |
 | STATS | 0x0050 | 双向 | 性能统计 |
 | CURSOR_POSITION | 0x0060 | S→C | 独立鼠标位置更新 |
@@ -69,6 +70,7 @@ Payload:
 │ Width        │ Height       │ RefreshRate  │ Codec        │
 │ uint32       │ uint32       │ uint32       │ uint8        │
 │              │              │ Hz           │ 0=Raw,1=H264 │
+│              │              │              │ 2=HEVC       │
 └──────────────┴──────────────┴──────────────┘
 ```
 
@@ -79,6 +81,16 @@ Payload:
 │ FrameIndex   │ Timestamp    │ IsKeyFrame   │ Width        │ Height       │ NAL Data     │
 │ uint64       │ uint64       │ uint8        │ uint32       │ uint32       │ bytes...     │
 │              │ ms           │ 0/1          │ pixels       │ pixels       │ Annex-B H264 │
+└──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
+```
+
+### FRAME_HEVC (0x0032)
+```
+Payload:
+┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐
+│ FrameIndex   │ Timestamp    │ IsKeyFrame   │ Width        │ Height       │ NAL Data     │
+│ uint64       │ uint64       │ uint8        │ uint32       │ uint32       │ bytes...     │
+│              │ ms           │ 0/1          │ pixels       │ pixels       │ Annex-B HEVC │
 └──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
 ```
 

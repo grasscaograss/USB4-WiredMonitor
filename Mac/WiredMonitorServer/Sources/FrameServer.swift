@@ -21,6 +21,7 @@ class FrameServer {
     private var connections: [NWConnection] = []
     private var lastFramePacket: Data?
     private var sendingConnectionIds: Set<ObjectIdentifier> = []
+    private var sendStartedAt: [ObjectIdentifier: Date] = [:]
     private var pendingFramePackets: [ObjectIdentifier: Data] = [:]
     private var pendingRealtimePackets: [ObjectIdentifier: Data] = [:]
     private var receiveBuffers: [ObjectIdentifier: Data] = [:]
@@ -154,6 +155,9 @@ class FrameServer {
     private func sendPacket(_ packet: Data, to conn: NWConnection, kind: PacketKind) {
         let id = ObjectIdentifier(conn)
         sendingConnectionIds.insert(id)
+        let startedAt = Date()
+        sendStartedAt[id] = startedAt
+        scheduleSendTimeout(for: conn, id: id, startedAt: startedAt)
 
         conn.send(content: packet, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
@@ -170,9 +174,37 @@ class FrameServer {
                     self.sendPacket(pending.packet, to: conn, kind: pending.kind)
                 } else {
                     self.sendingConnectionIds.remove(id)
+                    self.sendStartedAt.removeValue(forKey: id)
                 }
             }
         })
+    }
+
+    private func scheduleSendTimeout(for conn: NWConnection, id: ObjectIdentifier, startedAt: Date) {
+        let timeout = sendTimeout()
+        queue.asyncAfter(deadline: .now() + timeout) { [weak self, weak conn] in
+            guard let self, let conn else { return }
+            guard self.connections.contains(where: { $0 === conn }),
+                  self.sendingConnectionIds.contains(id),
+                  self.sendStartedAt[id] == startedAt else {
+                return
+            }
+
+            print("[服务端] 发送超时 \(String(format: "%.1f", timeout))s，重置客户端连接")
+            conn.cancel()
+            self.removeConnection(conn)
+        }
+    }
+
+    private func sendTimeout() -> TimeInterval {
+        if let value = ProcessInfo.processInfo.environment["WIRED_MONITOR_SEND_TIMEOUT_MS"],
+           let parsed = Double(value),
+           parsed >= 500,
+           parsed <= 30_000 {
+            return parsed / 1000.0
+        }
+
+        return 3.0
     }
 
     private func nextPendingPacket(after kind: PacketKind, for id: ObjectIdentifier) -> (packet: Data, kind: PacketKind)? {
@@ -200,6 +232,7 @@ class FrameServer {
         let id = ObjectIdentifier(conn)
         connections.removeAll { $0 === conn }
         sendingConnectionIds.remove(id)
+        sendStartedAt.removeValue(forKey: id)
         pendingFramePackets.removeValue(forKey: id)
         pendingRealtimePackets.removeValue(forKey: id)
         receiveBuffers.removeValue(forKey: id)

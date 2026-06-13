@@ -46,6 +46,7 @@ public partial class App : Application
             : ProtocolConstants.VideoPort;
 
         var h264Frames = 0;
+        var hevcFrames = 0;
         var rawFrames = 0;
         var keyFrames = 0;
         var bytes = 0L;
@@ -58,6 +59,14 @@ public partial class App : Application
             bytes += frame.Data.Length;
             if (h264Frames <= 3 || frame.IsKeyFrame)
                 DiagLog.Write($"Probe H264: idx={frame.FrameIndex}, key={frame.IsKeyFrame}, bytes={frame.Data.Length}");
+        };
+        receiver.OnHevcFrame += (_, frame) =>
+        {
+            hevcFrames++;
+            if (frame.IsKeyFrame) keyFrames++;
+            bytes += frame.Data.Length;
+            if (hevcFrames <= 3 || frame.IsKeyFrame)
+                DiagLog.Write($"Probe HEVC: idx={frame.FrameIndex}, key={frame.IsKeyFrame}, bytes={frame.Data.Length}");
         };
         receiver.OnRawFrame += (_, frame) =>
         {
@@ -72,6 +81,6 @@ public partial class App : Application
         receiver.ConnectAsync(host, port, new ClientDisplayInfo(1920, 1080, 60, 96)).GetAwaiter().GetResult();
         Task.Delay(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
         receiver.Disconnect();
-        DiagLog.Write($"Probe 结果: h264={h264Frames}, raw={rawFrames}, key={keyFrames}, bytes={bytes}");
+        DiagLog.Write($"Probe 结果: h264={h264Frames}, hevc={hevcFrames}, raw={rawFrames}, key={keyFrames}, bytes={bytes}");
     }
 }

@@ -15,12 +15,15 @@ public class FrameReceiver
     private const int SocketBufferSize = 4 * 1024 * 1024;
     private const int LargePacketLogBytes = 256 * 1024;
     private const double SlowPacketReadMs = 20.0;
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(5);
 
     private TcpClient? _client;
     private NetworkStream? _stream;
     private CancellationTokenSource? _cts;
+    private long _connectionGeneration;
 
     public event EventHandler<FramePayload>? OnH264Frame;
+    public event EventHandler<FramePayload>? OnHevcFrame;
     public event EventHandler<RawFramePayload>? OnRawFrame;
     public event EventHandler<CursorPositionPayload>? OnCursorPosition;
     public event EventHandler<bool>? OnConnectionChanged;
@@ -31,49 +34,84 @@ public class FrameReceiver
     public async Task ConnectAsync(string host, int port, ClientDisplayInfo displayInfo, CancellationToken ct = default)
     {
         DiagLog.Write($"ConnectAsync 开始: {host}:{port}");
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        DisconnectCurrent(notify: false);
+        var generation = Interlocked.Increment(ref _connectionGeneration);
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         var address = IPAddress.TryParse(host, out var parsedAddress) ? parsedAddress : null;
-        _client = address == null
+        var client = address == null
             ? new TcpClient()
             : new TcpClient(address.AddressFamily);
-        _client.NoDelay = true;
-        _client.ReceiveBufferSize = SocketBufferSize;
-        _client.SendBufferSize = 256 * 1024;
+        client.NoDelay = true;
+        client.ReceiveBufferSize = SocketBufferSize;
+        client.SendBufferSize = 256 * 1024;
 
         var connectTask = address == null
-            ? _client.ConnectAsync(host, port)
-            : _client.ConnectAsync(address, port);
-        await connectTask.WaitAsync(TimeSpan.FromSeconds(5), ct);
+            ? client.ConnectAsync(host, port)
+            : client.ConnectAsync(address, port);
 
-        _stream = _client.GetStream();
-        await SendHelloAsync(displayInfo, _cts.Token);
-        DiagLog.Write($"TCP 连接成功: recvBuf={_client.ReceiveBufferSize}, sendBuf={_client.SendBufferSize}");
-
-        OnConnectionChanged?.Invoke(this, true);
-
-        _ = Task.Run(async () =>
+        try
         {
-            try { await ReceiveLoop(_cts.Token); }
-            catch (OperationCanceledException) { }
-            catch (Exception ex)
+            await connectTask.WaitAsync(ConnectTimeout, ct);
+
+            var stream = client.GetStream();
+            _client = client;
+            _stream = stream;
+            _cts = cts;
+
+            await SendHelloAsync(stream, displayInfo, cts.Token);
+            DiagLog.Write($"TCP 连接成功: recvBuf={client.ReceiveBufferSize}, sendBuf={client.SendBufferSize}, generation={generation}");
+
+            if (!IsCurrentConnection(generation))
+                throw new OperationCanceledException("连接已被新的会话替换");
+
+            OnConnectionChanged?.Invoke(this, true);
+
+            _ = Task.Run(async () =>
             {
-                Console.WriteLine($"[网络] 断开: {ex.Message}");
-                DiagLog.Write(ex, "ReceiveLoop 异常");
-                OnReceiveError?.Invoke(this, ex.Message);
-            }
-            OnConnectionChanged?.Invoke(this, false);
-        }, _cts.Token);
+                try
+                {
+                    await ReceiveLoop(stream, cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    if (IsCurrentConnection(generation))
+                    {
+                        Console.WriteLine($"[网络] 断开: {ex.Message}");
+                        DiagLog.Write(ex, "ReceiveLoop 异常");
+                        OnReceiveError?.Invoke(this, ex.Message);
+                    }
+                }
+                finally
+                {
+                    if (IsCurrentConnection(generation))
+                    {
+                        ClearConnectionFields();
+                        OnConnectionChanged?.Invoke(this, false);
+                    }
+                }
+            }, CancellationToken.None);
+        }
+        catch
+        {
+            if (IsCurrentConnection(generation))
+                DisconnectCurrent(notify: false);
+
+            CloseClient(client, cts);
+
+            throw;
+        }
     }
 
     public void Disconnect()
     {
-        _cts?.Cancel();
-        _stream?.Close();
-        _client?.Close();
+        DisconnectCurrent(notify: true);
     }
 
-    private async Task ReceiveLoop(CancellationToken ct)
+    private async Task ReceiveLoop(NetworkStream stream, CancellationToken ct)
     {
         var headerBuf = new byte[ProtocolConstants.HeaderSize];
         byte[]? dataBuf = null;
@@ -86,21 +124,24 @@ public class FrameReceiver
 
         while (!ct.IsCancellationRequested && _stream != null)
         {
-            await ReadExact(headerBuf, 0, headerBuf.Length, ct);
+            await ReadExact(stream, headerBuf, 0, headerBuf.Length, ct);
 
             PacketType packetType;
             int payloadLength;
 
             if (PacketHeader.TryDecode(headerBuf, out var header))
             {
-                if (header.PayloadLength == 0 || header.PayloadLength > MaxPayloadLength)
+                if (!Enum.IsDefined(typeof(PacketType), header.Type))
+                    throw new InvalidDataException($"未知包类型: 0x{(ushort)header.Type:X4}");
+
+                if (header.PayloadLength > MaxPayloadLength)
                     throw new InvalidDataException($"无效 payload 长度: {header.PayloadLength}");
 
                 packetType = header.Type;
                 payloadLength = (int)header.PayloadLength;
                 dataBuf = dataBuf?.Length >= payloadLength ? dataBuf : new byte[payloadLength];
                 var payloadReadStart = Stopwatch.GetTimestamp();
-                await ReadExact(dataBuf, 0, payloadLength, ct);
+                await ReadExact(stream, dataBuf, 0, payloadLength, ct);
                 var payloadReadMs = ElapsedMilliseconds(payloadReadStart);
 
                 if (!loggedFirstPacket)
@@ -110,7 +151,7 @@ public class FrameReceiver
                 }
 
                 var packetReadLogNow = DateTime.UtcNow;
-                if (packetType == PacketType.FrameH264 &&
+                if ((packetType == PacketType.FrameH264 || packetType == PacketType.FrameHevc) &&
                     (payloadLength >= LargePacketLogBytes || payloadReadMs >= SlowPacketReadMs) &&
                     (packetReadLogNow - lastPacketReadLogTime).TotalMilliseconds >= 500)
                 {
@@ -120,7 +161,10 @@ public class FrameReceiver
             }
             else
             {
-                var legacyFrame = await TryReadLegacyFrame(headerBuf, dataBuf, ct);
+                if (loggedFirstPacket)
+                    throw new InvalidDataException($"WM 协议流失步: {Convert.ToHexString(headerBuf)}");
+
+                var legacyFrame = await TryReadLegacyFrame(stream, headerBuf, dataBuf, ct);
                 if (legacyFrame == null)
                     throw new InvalidDataException($"无效包头: {Convert.ToHexString(headerBuf)}");
 
@@ -140,6 +184,10 @@ public class FrameReceiver
             {
                 case PacketType.FrameH264:
                     OnH264Frame?.Invoke(this, FramePayload.Parse(dataBuf, payloadLength));
+                    isVideoFrame = true;
+                    break;
+                case PacketType.FrameHevc:
+                    OnHevcFrame?.Invoke(this, FramePayload.Parse(dataBuf, payloadLength));
                     isVideoFrame = true;
                     break;
                 case PacketType.FrameRaw:
@@ -172,10 +220,8 @@ public class FrameReceiver
         }
     }
 
-    private async Task SendHelloAsync(ClientDisplayInfo displayInfo, CancellationToken ct)
+    private async Task SendHelloAsync(NetworkStream stream, ClientDisplayInfo displayInfo, CancellationToken ct)
     {
-        if (_stream == null) return;
-
         var payload = new byte[16];
         BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0, 4), (uint)displayInfo.Width);
         BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(4, 4), (uint)displayInfo.Height);
@@ -194,12 +240,12 @@ public class FrameReceiver
         Buffer.BlockCopy(header, 0, packet, 0, header.Length);
         Buffer.BlockCopy(payload, 0, packet, header.Length, payload.Length);
 
-        await _stream.WriteAsync(packet.AsMemory(0, packet.Length), ct);
-        await _stream.FlushAsync(ct);
+        await stream.WriteAsync(packet.AsMemory(0, packet.Length), ct);
+        await stream.FlushAsync(ct);
         DiagLog.Write($"发送HELLO: {displayInfo.Width}x{displayInfo.Height} @ {displayInfo.RefreshRate}Hz, dpi={displayInfo.Dpi}");
     }
 
-    private async Task<LegacyFrame?> TryReadLegacyFrame(byte[] firstBytes, byte[]? dataBuf, CancellationToken ct)
+    private async Task<LegacyFrame?> TryReadLegacyFrame(NetworkStream stream, byte[] firstBytes, byte[]? dataBuf, CancellationToken ct)
     {
         var packetLength = BitConverter.ToUInt32(firstBytes, 0);
         if (packetLength < 2 || packetLength > MaxPayloadLength + 2)
@@ -223,22 +269,55 @@ public class FrameReceiver
 
         var remaining = payloadLength - bytesAlreadyRead;
         if (remaining > 0)
-            await ReadExact(dataBuf, bytesAlreadyRead, remaining, ct);
+            await ReadExact(stream, dataBuf, bytesAlreadyRead, remaining, ct);
 
         return new LegacyFrame(packetType, payloadLength, dataBuf);
     }
 
     private readonly record struct LegacyFrame(PacketType PacketType, int PayloadLength, byte[] Buffer);
 
-    private async Task ReadExact(byte[] buf, int offset, int count, CancellationToken ct)
+    private async Task ReadExact(NetworkStream stream, byte[] buf, int offset, int count, CancellationToken ct)
     {
         var end = offset + count;
         while (offset < end)
         {
-            var n = await _stream!.ReadAsync(buf.AsMemory(offset, end - offset), ct);
+            var n = await stream.ReadAsync(buf.AsMemory(offset, end - offset), ct);
             if (n == 0) throw new IOException("连接已关闭");
             offset += n;
         }
+    }
+
+    private bool IsCurrentConnection(long generation)
+    {
+        return Volatile.Read(ref _connectionGeneration) == generation;
+    }
+
+    private void DisconnectCurrent(bool notify)
+    {
+        Interlocked.Increment(ref _connectionGeneration);
+        var cts = _cts;
+        var stream = _stream;
+        var client = _client;
+        ClearConnectionFields();
+        CloseClient(client, cts, stream);
+
+        if (notify)
+            OnConnectionChanged?.Invoke(this, false);
+    }
+
+    private void ClearConnectionFields()
+    {
+        _cts = null;
+        _stream = null;
+        _client = null;
+    }
+
+    private static void CloseClient(TcpClient? client, CancellationTokenSource? cts, NetworkStream? stream = null)
+    {
+        try { cts?.Cancel(); } catch { }
+        try { stream?.Close(); } catch { }
+        try { client?.Close(); } catch { }
+        cts?.Dispose();
     }
 
     private static double ElapsedMilliseconds(long startTimestamp)

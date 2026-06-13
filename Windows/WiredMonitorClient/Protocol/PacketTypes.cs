@@ -8,6 +8,7 @@ public enum PacketType : ushort
     FrameRequest = 0x0020,
     FrameH264 = 0x0030,
     FrameRaw = 0x0031,
+    FrameHevc = 0x0032,
     InputEvent = 0x0040,
     Stats = 0x0050,
     CursorPosition = 0x0060,

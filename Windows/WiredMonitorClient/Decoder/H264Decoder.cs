@@ -9,6 +9,12 @@ using WiredMonitorClient.Video;
 
 namespace WiredMonitorClient.Decoder;
 
+public enum VideoDecoderCodec
+{
+    H264,
+    Hevc,
+}
+
 public unsafe class H264Decoder : IDisposable
 {
     private const int D3D11BindShaderResource = 0x8;
@@ -17,6 +23,9 @@ public unsafe class H264Decoder : IDisposable
 
     private readonly ILogger _logger;
     private readonly AVCodecContext_get_format _getFormatCallback;
+    private readonly VideoDecoderCodec _codec;
+    private readonly AVCodecID _codecId;
+    private readonly string _codecName;
     private AVCodecContext* _codecContext;
     private AVBufferRef* _hwDeviceContext;
     private AVFrame* _frame;
@@ -35,6 +44,7 @@ public unsafe class H264Decoder : IDisposable
     private bool _hardwareSetupFailed;
     private bool _hardwareFrameLogged;
     private bool _unexpectedSoftwareFrameLogged;
+    private bool _unsupportedD3D11DirectFormatLogged;
     private DateTime _lastDecodedHashTime = DateTime.MinValue;
     private ulong _lastDecodedHash;
     private readonly bool _decodedHashDiagnostics = Environment.GetEnvironmentVariable("WIRED_MONITOR_DIAG_HASH") == "1";
@@ -50,9 +60,12 @@ public unsafe class H264Decoder : IDisposable
     public Func<bool>? ShouldOutputFrame { get; set; }
     public Func<bool>? ShouldUseD3D11Output { get; set; }
 
-    public H264Decoder(ILogger<H264Decoder> logger)
+    public H264Decoder(ILogger<H264Decoder> logger, VideoDecoderCodec codec = VideoDecoderCodec.H264)
     {
         _logger = logger;
+        _codec = codec;
+        _codecId = codec == VideoDecoderCodec.Hevc ? AVCodecID.AV_CODEC_ID_HEVC : AVCodecID.AV_CODEC_ID_H264;
+        _codecName = codec == VideoDecoderCodec.Hevc ? "HEVC" : "H.264";
         _getFormatCallback = SelectHardwarePixelFormat;
     }
 
@@ -76,19 +89,19 @@ public unsafe class H264Decoder : IDisposable
         try
         {
             DiagLog.Write($"FFmpeg version: {ffmpeg.av_version_info()}");
-            codec = ffmpeg.avcodec_find_decoder(AVCodecID.AV_CODEC_ID_H264);
+            codec = ffmpeg.avcodec_find_decoder(_codecId);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "查找 H.264 解码器异常");
-            DiagLog.Write(ex, "查找 H.264 解码器异常");
+            _logger.LogError(ex, "查找 {Codec} 解码器异常", _codecName);
+            DiagLog.Write(ex, $"查找 {_codecName} 解码器异常");
             return false;
         }
 
         if (codec == null)
         {
-            _logger.LogError("找不到 H.264 解码器");
-            DiagLog.Write("FFmpeg 初始化失败: 找不到 H.264 解码器");
+            _logger.LogError("找不到 {Codec} 解码器", _codecName);
+            DiagLog.Write($"FFmpeg 初始化失败: 找不到 {_codecName} 解码器");
             return false;
         }
 
@@ -111,8 +124,8 @@ public unsafe class H264Decoder : IDisposable
         if (openResult < 0)
         {
             var error = ErrorToString(openResult);
-            _logger.LogError("硬件 H.264 解码器打开失败: {Error}", error);
-            DiagLog.Write($"FFmpeg 初始化失败: 硬件 H.264 解码器打开失败: {error}");
+            _logger.LogError("硬件 {Codec} 解码器打开失败: {Error}", _codecName, error);
+            DiagLog.Write($"FFmpeg 初始化失败: 硬件 {_codecName} 解码器打开失败: {error}");
             Dispose();
             return false;
         }
@@ -121,20 +134,21 @@ public unsafe class H264Decoder : IDisposable
         _packet = ffmpeg.av_packet_alloc();
         if (_frame == null || _packet == null)
         {
-            _logger.LogError("无法分配 H.264 解码帧/包");
-            DiagLog.Write("FFmpeg 初始化失败: 无法分配 H.264 解码帧/包");
+            _logger.LogError("无法分配 {Codec} 解码帧/包", _codecName);
+            DiagLog.Write($"FFmpeg 初始化失败: 无法分配 {_codecName} 解码帧/包");
             Dispose();
             return false;
         }
 
         _initialized = true;
         _logger.LogInformation(
-            "H.264 硬件解码器已初始化 ({Width}x{Height}, {DeviceType}, pix_fmt={PixelFormat})",
+            "{Codec} 硬件解码器已初始化 ({Width}x{Height}, {DeviceType}, pix_fmt={PixelFormat})",
+            _codecName,
             width,
             height,
             _hwDeviceType,
             _hwPixelFormat);
-        DiagLog.Write($"H.264 硬件解码器已初始化: {width}x{height}, {_hwDeviceType}, pix_fmt={_hwPixelFormat}");
+        DiagLog.Write($"{_codecName} 硬件解码器已初始化: {width}x{height}, {_hwDeviceType}, pix_fmt={_hwPixelFormat}");
         return true;
     }
 
@@ -156,7 +170,7 @@ public unsafe class H264Decoder : IDisposable
         {
             if (!TryFindHardwareConfig(codec, deviceType, out var pixelFormat))
             {
-                DiagLog.Write($"硬件解码不可用: {deviceType} 没有匹配的 H.264 hw config");
+                DiagLog.Write($"硬件解码不可用: {deviceType} 没有匹配的 {_codecName} hw config");
                 continue;
             }
 
@@ -183,13 +197,13 @@ public unsafe class H264Decoder : IDisposable
             _codecContext->get_format = _getFormatCallback;
             ConfigureD3D11DirectOutput(deviceType, deviceContext);
 
-            _logger.LogInformation("H.264 硬件解码已配置: {DeviceType}, pix_fmt={PixelFormat}", deviceType, pixelFormat);
-            DiagLog.Write($"H.264 硬件解码已配置: {deviceType}, pix_fmt={pixelFormat}");
+            _logger.LogInformation("{Codec} 硬件解码已配置: {DeviceType}, pix_fmt={PixelFormat}", _codecName, deviceType, pixelFormat);
+            DiagLog.Write($"{_codecName} 硬件解码已配置: {deviceType}, pix_fmt={pixelFormat}");
             return true;
         }
 
-        _logger.LogError("没有可用的 H.264 硬件解码器，已拒绝软件解码回退");
-        DiagLog.Write("FFmpeg 初始化失败: 没有可用的 H.264 硬件解码器，已拒绝软件解码回退");
+        _logger.LogError("没有可用的 {Codec} 硬件解码器，已拒绝软件解码回退", _codecName);
+        DiagLog.Write($"FFmpeg 初始化失败: 没有可用的 {_codecName} 硬件解码器，已拒绝软件解码回退");
         return false;
     }
 
@@ -371,8 +385,8 @@ public unsafe class H264Decoder : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "H.264 硬件解码异常");
-            DiagLog.Write(ex, $"H.264 硬件解码异常, nalBytes={nalData.Length}, key={isKeyFrame}");
+            _logger.LogError(ex, "{Codec} 硬件解码异常", _codecName);
+            DiagLog.Write(ex, $"{_codecName} 硬件解码异常, nalBytes={nalData.Length}, key={isKeyFrame}");
             throw;
         }
     }
@@ -392,6 +406,9 @@ public unsafe class H264Decoder : IDisposable
         {
             return null;
         }
+
+        if (!CanUseD3D11DirectFrame(frame))
+            return null;
 
         var device = GetD3D11Device();
         var deviceContext = GetD3D11DeviceContext();
@@ -419,6 +436,33 @@ public unsafe class H264Decoder : IDisposable
             frame->width,
             frame->height,
             () => ReleaseRetainedFrame(retainedFramePtr));
+    }
+
+    private bool CanUseD3D11DirectFrame(AVFrame* frame)
+    {
+        if (_codec != VideoDecoderCodec.Hevc)
+            return true;
+
+        var softwareFormat = GetHardwareSoftwareFormat(frame);
+        if (softwareFormat == AVPixelFormat.AV_PIX_FMT_NV12)
+            return true;
+
+        if (!_unsupportedD3D11DirectFormatLogged)
+        {
+            _unsupportedD3D11DirectFormatLogged = true;
+            DiagLog.Write($"HEVC D3D11直通暂只支持 NV12，当前 sw_format={softwareFormat}，改走硬解下载+BGRA转换路径");
+        }
+
+        return false;
+    }
+
+    private static AVPixelFormat GetHardwareSoftwareFormat(AVFrame* frame)
+    {
+        if (frame->hw_frames_ctx == null || frame->hw_frames_ctx->data == null)
+            return AVPixelFormat.AV_PIX_FMT_NONE;
+
+        var framesContext = (AVHWFramesContext*)frame->hw_frames_ctx->data;
+        return framesContext->sw_format;
     }
 
     private IntPtr GetD3D11Device()
@@ -474,8 +518,8 @@ public unsafe class H264Decoder : IDisposable
             if (!_hardwareFrameLogged)
             {
                 _hardwareFrameLogged = true;
-                _logger.LogInformation("H.264 硬件解码输出已启用: {DeviceType}", _hwDeviceType);
-                DiagLog.Write($"H.264 硬件解码输出已启用: {_hwDeviceType}");
+                _logger.LogInformation("{Codec} 硬件解码输出已启用: {DeviceType}", _codecName, _hwDeviceType);
+                DiagLog.Write($"{_codecName} 硬件解码输出已启用: {_hwDeviceType}");
                 DiagLog.Write($"D3D11VA硬解纹理: format={(AVPixelFormat)frame->format}, texture={PointerToHex(frame->data[0])}, slice={PointerToHex(frame->data[1])}, hwFramesCtx={PointerToHex(frame->hw_frames_ctx)}");
             }
 
@@ -615,7 +659,7 @@ public unsafe class H264Decoder : IDisposable
         var transferAvgMs = TicksToAverageMs(_hwTransferTicks, frames);
         var swsAvgMs = TicksToAverageMs(_swsScaleTicks, frames);
         var otherAvgMs = Math.Max(0, avgMs - transferAvgMs - swsAvgMs);
-        DiagLog.Write($"H264解码处理: frames={_decodeWorkFrames}, avg={avgMs:F1}ms, transfer={transferAvgMs:F1}ms, sws={swsAvgMs:F1}ms, other={otherAvgMs:F1}ms, skippedOutput={_skippedOutputFrames}");
+        DiagLog.Write($"{_codecName}解码处理: frames={_decodeWorkFrames}, avg={avgMs:F1}ms, transfer={transferAvgMs:F1}ms, sws={swsAvgMs:F1}ms, other={otherAvgMs:F1}ms, skippedOutput={_skippedOutputFrames}");
         _decodeWorkTicks = 0;
         _hwTransferTicks = 0;
         _swsScaleTicks = 0;

@@ -10,6 +10,7 @@ enum PacketType: UInt16 {
     case frameRequest = 0x0020
     case frameH264 = 0x0030
     case frameRaw = 0x0031
+    case frameHevc = 0x0032
     case inputEvent = 0x0040
     case stats = 0x0050
     case cursorPosition = 0x0060
