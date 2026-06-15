@@ -16,12 +16,13 @@ USB4 Wired Monitor 通过一根 USB4/Thunderbolt 线，把 Windows 电脑变成 
 - Windows 端可选 D3D11 直通渲染路径。
 - Windows 客户端自动检测 Mac USB4 IP。
 - 可选通过 `CGVirtualDisplay` 运行时类创建 macOS 虚拟显示器。
+- 可用 `Ctrl+Option+Command+W` 切换 Windows 控制模式，用 Mac 键鼠临时操作真实 Windows 桌面。
 - Windows 客户端支持英文和简体中文界面。
 - 独立的网络吞吐和延迟测试工具。
 
 ## 当前限制
 
-- 还没有实现输入转发，因此当前重点是显示输出。
+- Windows 控制模式仅面向普通桌面和普通应用，不保证控制管理员窗口或 UAC 安全桌面。
 - 虚拟显示器依赖 macOS 运行时是否提供 `CGVirtualDisplay`。如果不可用，可以使用主屏镜像模式。
 - Windows 客户端为了稳定低延迟，刻意要求硬件解码，不回退到软件解码。
 - 仓库不内置 FFmpeg DLL。
@@ -43,6 +44,7 @@ Protocol/                     通信协议文档
 - Xcode Command Line Tools。
 - Swift Package Manager。
 - 启动服务端的终端/App 需要屏幕录制权限。
+- 使用 Windows 控制模式时，启动服务端的终端/App 还需要辅助功能和输入监控权限。
 - USB4/Thunderbolt 接口和线缆。
 
 ### Windows
@@ -106,6 +108,20 @@ dotnet run
 ```
 
 可以留空 Mac 地址，直接点击 **连接**；客户端会尝试通过 USB4 自动发现 Mac 服务端。也可以手动输入 Mac 的 Thunderbolt Bridge IP。
+
+## Windows 控制模式
+
+当 Mac 鼠标已经移动到 Windows 这块扩展屏上，又需要临时操作真实 Windows 桌面时，可以在 Mac 端按：
+
+```text
+Ctrl+Option+Command+W
+```
+
+进入控制模式后，Windows 客户端会隐藏扩展屏窗口，Mac 键鼠会通过同一条 USB4/TB TCP 连接转发到 Windows，并由 Windows 端通过 `SendInput` 注入普通桌面。再次按同一热键会退出控制模式并恢复 Wired Monitor 窗口。
+
+键位默认采用 Mac 使用习惯：`Command` 映射为 Windows `Ctrl`，`Option` 映射为 `Alt`。因此 `Command+C/V/A/Z` 会按 Windows 的复制、粘贴、全选、撤销执行。
+
+首次使用时，macOS 可能要求给启动 `swift run` 的终端/App 授予辅助功能和输入监控权限。未授权时，视频扩展屏仍可工作，但控制模式不会启用。Windows 端第一版只保证普通桌面和普通应用，不保证 UAC 安全桌面。
 
 ## 语言
 

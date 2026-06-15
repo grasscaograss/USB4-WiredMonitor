@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging;
 using WiredMonitorClient.Decoder;
 using WiredMonitorClient.Diagnostics;
 using WiredMonitorClient.Display;
+using WiredMonitorClient.Input;
 using WiredMonitorClient.Localization;
 using WiredMonitorClient.Network;
 using WiredMonitorClient.Protocol;
@@ -43,6 +44,7 @@ public partial class MainWindow : Window
     private readonly FrameReceiver _receiver;
     private readonly FrameRenderer _renderer;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly WindowsInputInjector _windowsInputInjector = new();
     private readonly IntPtr _windowHandle;
     private readonly DispatcherTimer _localCursorIdleTimer;
     private H264Decoder? _h264Decoder;
@@ -94,6 +96,8 @@ public partial class MainWindow : Window
     private bool _isLocalCursorHidden;
     private Point? _lastLocalCursorPosition;
     private bool _applyingLocalization;
+    private volatile bool _windowsControlModeActive;
+    private WindowState _windowsControlPreviousWindowState = WindowState.Normal;
     private Usb4IpStatusKind _usb4IpStatus = Usb4IpStatusKind.Detecting;
     private string? _usb4IpStatusHost;
 
@@ -117,6 +121,8 @@ public partial class MainWindow : Window
         _receiver.OnHevcFrame += (_, frame) => OnCompressedFrame(frame, VideoDecoderCodec.Hevc);
         _receiver.OnRawFrame += OnRawFrame;
         _receiver.OnCursorPosition += OnCursorPosition;
+        _receiver.OnWindowsControlMode += OnWindowsControlMode;
+        _receiver.OnWindowsInputEvent += OnWindowsInputEvent;
         _receiver.OnConnectionChanged += OnConnectionChanged;
         _receiver.OnReceiveError += OnReceiveError;
 
@@ -268,6 +274,7 @@ public partial class MainWindow : Window
         ConnectButton.Content = AppText.ConnectButton;
         DisconnectButton.Content = AppText.DisconnectButton;
         UpdateFullscreenButtonText();
+        UpdateWindowsControlButtonText();
         ConnectionStatus.Text = _receiver.IsConnected ? AppText.Connected : AppText.NotConnected;
         UpdateUsb4IpStatusText();
 
@@ -286,6 +293,27 @@ public partial class MainWindow : Window
     private void UpdateFullscreenButtonText()
     {
         FullscreenButton.Content = _isFullscreen ? AppText.ExitFullscreenButton : AppText.FullscreenButton;
+    }
+
+    private void UpdateWindowsControlButtonText()
+    {
+        WindowsControlButton.Content = _windowsControlModeActive
+            ? AppText.WindowsControlActiveButton
+            : AppText.WindowsControlButton;
+        WindowsControlButton.IsEnabled = _receiver.IsConnected;
+    }
+
+    private void WindowsControlButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_windowsControlModeActive)
+        {
+            SetWindowsControlMode(false, activateWindow: true);
+            return;
+        }
+
+        StatusText.Text = AppText.WindowsControlHotkeyHint;
+        StatusText.Visibility = Visibility.Visible;
+        StatusText.Foreground = Brushes.White;
     }
 
     private void OnDisplayHostMouseEnter(object sender, MouseEventArgs e)
@@ -361,6 +389,7 @@ public partial class MainWindow : Window
                 StatusText.Foreground = System.Windows.Media.Brushes.White;
                 ConnectButton.IsEnabled = false;
                 DisconnectButton.IsEnabled = true;
+                UpdateWindowsControlButtonText();
                 _frameCount = 0;
                 _totalBytes = 0;
                 _displayWidth = 0;
@@ -390,6 +419,7 @@ public partial class MainWindow : Window
             }
             else
             {
+                SetWindowsControlMode(false, activateWindow: true);
                 StatusDot.Fill = System.Windows.Media.Brushes.Red;
                 ConnectionStatus.Text = AppText.NotConnected;
                 StatusText.Text = _lastReceiveError == null
@@ -400,6 +430,7 @@ public partial class MainWindow : Window
                 RemoteCursor.Visibility = Visibility.Collapsed;
                 ConnectButton.IsEnabled = true;
                 DisconnectButton.IsEnabled = false;
+                UpdateWindowsControlButtonText();
                 FpsText.Text = "";
                 FrameSizeText.Text = "";
                 _decodeCts?.Cancel();
@@ -1033,6 +1064,59 @@ public partial class MainWindow : Window
     private void OnCursorPosition(object? sender, CursorPositionPayload cursor)
     {
         Dispatcher.Invoke(() => UpdateRemoteCursor(cursor));
+    }
+
+    private void OnWindowsControlMode(object? sender, WindowsControlModePayload mode)
+    {
+        Dispatcher.Invoke(() => SetWindowsControlMode(mode.Enabled, activateWindow: !mode.Enabled));
+    }
+
+    private void OnWindowsInputEvent(object? sender, WindowsInputEventPayload input)
+    {
+        if (!_windowsControlModeActive)
+            return;
+
+        try
+        {
+            _windowsInputInjector.Inject(input);
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Write(ex, "Windows 输入注入失败");
+        }
+    }
+
+    private void SetWindowsControlMode(bool enabled, bool activateWindow)
+    {
+        if (enabled == _windowsControlModeActive)
+            return;
+
+        if (enabled)
+        {
+            var sourceWidth = _lastDisplayInfo?.Width > 0 ? _lastDisplayInfo.Value.Width : _displayWidth;
+            var sourceHeight = _lastDisplayInfo?.Height > 0 ? _lastDisplayInfo.Value.Height : _displayHeight;
+            _windowsInputInjector.SetTargetWindow(_windowHandle, sourceWidth, sourceHeight);
+            _windowsInputInjector.ReleaseCommonModifiers();
+            _windowsControlPreviousWindowState = WindowState;
+            _windowsControlModeActive = true;
+            UpdateWindowsControlButtonText();
+            ShowLocalCursor();
+            WindowState = WindowState.Minimized;
+            DiagLog.Write($"进入 Windows 控制模式: source={sourceWidth}x{sourceHeight}");
+            return;
+        }
+
+        _windowsInputInjector.ReleaseCommonModifiers();
+        _windowsControlModeActive = false;
+        UpdateWindowsControlButtonText();
+        if (!IsVisible)
+            Show();
+
+        WindowState = _windowsControlPreviousWindowState;
+        if (activateWindow)
+            Activate();
+
+        DiagLog.Write("退出 Windows 控制模式");
     }
 
     private void UpdateRemoteCursor(CursorPositionPayload cursor)

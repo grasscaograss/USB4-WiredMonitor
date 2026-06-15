@@ -6,16 +6,19 @@ private final class StreamRuntime {
     let capture: ScreenCapture
     let encoder: H264Encoder?
     let cursorTracker: CursorTracker?
+    let inputForwarder: WindowsControlForwarder?
     let virtualDisplay: VirtualDisplay?
 
-    init(capture: ScreenCapture, encoder: H264Encoder?, cursorTracker: CursorTracker?, virtualDisplay: VirtualDisplay?) {
+    init(capture: ScreenCapture, encoder: H264Encoder?, cursorTracker: CursorTracker?, inputForwarder: WindowsControlForwarder?, virtualDisplay: VirtualDisplay?) {
         self.capture = capture
         self.encoder = encoder
         self.cursorTracker = cursorTracker
+        self.inputForwarder = inputForwarder
         self.virtualDisplay = virtualDisplay
     }
 
     func stop() {
+        inputForwarder?.stop()
         cursorTracker?.stop()
         capture.stop()
         encoder?.stop()
@@ -60,6 +63,9 @@ struct WiredMonitorServer {
                 }
             }
         }
+        server.onLastClientDisconnected = {
+            currentRuntime()?.inputForwarder?.exitControlModeAfterDisconnect()
+        }
 
         signalSource.setEventHandler {
             print("\n\(ServerText.mainTag) \(ServerText.text("正在关闭...", "Shutting down..."))")
@@ -93,6 +99,12 @@ struct WiredMonitorServer {
             let runtime = activeRuntime
             activeRuntime = nil
             return runtime
+        }
+    }
+
+    private static func currentRuntime() -> StreamRuntime? {
+        runtimeQueue.sync {
+            activeRuntime
         }
     }
 
@@ -131,13 +143,18 @@ struct WiredMonitorServer {
         let capture = ScreenCapture(displayID: displayID, fps: streamFps)
         let encoder = H264Encoder(width: width, height: height, fps: streamFps)
         let cursorTracker = makeCursorTracker(displayID: displayID, width: width, height: height, server: server)
+        let inputForwarder = WindowsControlForwarder(
+            server: server,
+            displayID: displayID,
+            targetWidth: clientInfo?.width ?? width,
+            targetHeight: clientInfo?.height ?? height)
         let forceRaw = ProcessInfo.processInfo.environment["WIRED_MONITOR_RAW"] == "1"
         let runtime: StreamRuntime
 
         if !forceRaw && encoder.start() {
             print("\(ServerText.mainTag) \(encoder.codecName) \(ServerText.text("编码模式", "encode mode"))")
             startH264Mode(capture: capture, encoder: encoder, server: server, width: width, height: height, fps: streamFps)
-            runtime = StreamRuntime(capture: capture, encoder: encoder, cursorTracker: cursorTracker, virtualDisplay: virtualDisplay)
+            runtime = StreamRuntime(capture: capture, encoder: encoder, cursorTracker: cursorTracker, inputForwarder: inputForwarder, virtualDisplay: virtualDisplay)
         } else {
             if !forceRaw && !encoder.usesDefaultCodec && ProcessInfo.processInfo.environment["WIRED_MONITOR_ALLOW_RAW_FALLBACK"] != "1" {
                 print("\(ServerText.mainTag) \(encoder.codecName) \(ServerText.text("编码器启动失败，已停止；如需回退 RAW，设置 WIRED_MONITOR_ALLOW_RAW_FALLBACK=1", "encoder failed to start and the server stopped. Set WIRED_MONITOR_ALLOW_RAW_FALLBACK=1 to allow RAW fallback."))")
@@ -147,12 +164,13 @@ struct WiredMonitorServer {
                 ? "\(ServerText.mainTag) \(ServerText.text("已强制使用 RAW 模式", "Forced RAW mode enabled"))"
                 : "\(ServerText.mainTag) \(ServerText.text("H.264 编码器启动失败，使用 RAW 模式", "H.264 encoder failed to start; using RAW mode"))")
             startRawMode(capture: capture, server: server, width: width, height: height, fps: streamFps)
-            runtime = StreamRuntime(capture: capture, encoder: nil, cursorTracker: cursorTracker, virtualDisplay: virtualDisplay)
+            runtime = StreamRuntime(capture: capture, encoder: nil, cursorTracker: cursorTracker, inputForwarder: inputForwarder, virtualDisplay: virtualDisplay)
         }
 
         print("\(ServerText.mainTag) \(ServerText.text("启动屏幕捕获...", "Starting screen capture..."))")
         await capture.start()
         cursorTracker?.start()
+        inputForwarder.start()
         return runtime
     }
 

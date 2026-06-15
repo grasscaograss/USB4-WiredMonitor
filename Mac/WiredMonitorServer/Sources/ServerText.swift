@@ -32,6 +32,7 @@ enum ServerText {
     static var captureTag: String { text("[捕获]", "[Capture]") }
     static var encoderTag: String { text("[编码器]", "[Encoder]") }
     static var cursorTag: String { text("[鼠标]", "[Cursor]") }
+    static var controlTag: String { text("[控制]", "[Control]") }
     static var virtualDisplayTag: String { text("[虚拟显示]", "[VirtualDisplay]") }
     static var statsTag: String { text("[统计]", "[Stats]") }
     static var rawStatsTag: String { text("[统计-RAW]", "[Stats-RAW]") }

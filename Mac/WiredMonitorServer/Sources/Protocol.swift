@@ -14,6 +14,8 @@ enum PacketType: UInt16 {
     case inputEvent = 0x0040
     case stats = 0x0050
     case cursorPosition = 0x0060
+    case windowsControlMode = 0x0070
+    case windowsInputEvent = 0x0071
 }
 
 let ProtocolMagic: UInt16 = 0x574D  // "WM"

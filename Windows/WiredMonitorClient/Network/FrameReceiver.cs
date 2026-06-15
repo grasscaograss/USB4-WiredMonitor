@@ -26,6 +26,8 @@ public class FrameReceiver
     public event EventHandler<FramePayload>? OnHevcFrame;
     public event EventHandler<RawFramePayload>? OnRawFrame;
     public event EventHandler<CursorPositionPayload>? OnCursorPosition;
+    public event EventHandler<WindowsControlModePayload>? OnWindowsControlMode;
+    public event EventHandler<WindowsInputEventPayload>? OnWindowsInputEvent;
     public event EventHandler<bool>? OnConnectionChanged;
     public event EventHandler<string>? OnReceiveError;
 
@@ -120,6 +122,7 @@ public class FrameReceiver
         var fpsCount = 0;
         var cursorCount = 0;
         var loggedFirstPacket = false;
+        var loggedUnknownPacketTypes = new HashSet<ushort>();
         var lastPacketReadLogTime = DateTime.MinValue;
 
         while (!ct.IsCancellationRequested && _stream != null)
@@ -131,9 +134,6 @@ public class FrameReceiver
 
             if (PacketHeader.TryDecode(headerBuf, out var header))
             {
-                if (!Enum.IsDefined(typeof(PacketType), header.Type))
-                    throw new InvalidDataException($"未知包类型: 0x{(ushort)header.Type:X4}");
-
                 if (header.PayloadLength > MaxPayloadLength)
                     throw new InvalidDataException($"无效 payload 长度: {header.PayloadLength}");
 
@@ -197,6 +197,17 @@ public class FrameReceiver
                 case PacketType.CursorPosition:
                     cursorCount++;
                     OnCursorPosition?.Invoke(this, CursorPositionPayload.Parse(dataBuf, payloadLength));
+                    break;
+                case PacketType.WindowsControlMode:
+                    OnWindowsControlMode?.Invoke(this, WindowsControlModePayload.Parse(dataBuf, payloadLength));
+                    break;
+                case PacketType.WindowsInputEvent:
+                    OnWindowsInputEvent?.Invoke(this, WindowsInputEventPayload.Parse(dataBuf, payloadLength));
+                    break;
+                default:
+                    var rawType = (ushort)packetType;
+                    if (loggedUnknownPacketTypes.Add(rawType))
+                        DiagLog.Write($"忽略未知包类型: 0x{rawType:X4}, payloadLen={payloadLength}");
                     break;
             }
 

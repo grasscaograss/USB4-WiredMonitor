@@ -43,6 +43,7 @@ class FrameServer {
         }
     }
     var onFirstClientConnected: ((ClientDisplayInfo?) -> Void)?
+    var onLastClientDisconnected: (() -> Void)?
 
     init(port: UInt16) {
         self.port = port
@@ -152,6 +153,17 @@ class FrameServer {
         }
     }
 
+    func sendWindowsControlMode(enabled: Bool) {
+        var payload = Data(capacity: 1)
+        var value: UInt8 = enabled ? 1 : 0
+        payload.append(Data(bytes: &value, count: 1))
+        sendRealtime(data: payload, packetType: .windowsControlMode)
+    }
+
+    func sendWindowsInput(data: Data) {
+        sendRealtime(data: data, packetType: .windowsInputEvent)
+    }
+
     private func sendPacket(_ packet: Data, to conn: NWConnection, kind: PacketKind) {
         let id = ObjectIdentifier(conn)
         sendingConnectionIds.insert(id)
@@ -229,6 +241,7 @@ class FrameServer {
     }
 
     private func removeConnection(_ conn: NWConnection) {
+        let hadConnections = !connections.isEmpty
         let id = ObjectIdentifier(conn)
         connections.removeAll { $0 === conn }
         sendingConnectionIds.remove(id)
@@ -236,6 +249,12 @@ class FrameServer {
         pendingFramePackets.removeValue(forKey: id)
         pendingRealtimePackets.removeValue(forKey: id)
         receiveBuffers.removeValue(forKey: id)
+
+        if hadConnections && connections.isEmpty {
+            firstClientNotificationSent = false
+            lastClientDisplayInfo = nil
+            onLastClientDisconnected?()
+        }
     }
 
     private func reportDroppedFramesIfNeeded() {

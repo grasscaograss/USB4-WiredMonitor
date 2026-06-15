@@ -39,6 +39,8 @@ Total header: 10 bytes
 | INPUT_EVENT | 0x0040 | C→S | 鼠标/键盘输入事件 |
 | STATS | 0x0050 | 双向 | 性能统计 |
 | CURSOR_POSITION | 0x0060 | S→C | 独立鼠标位置更新 |
+| WINDOWS_CONTROL_MODE | 0x0070 | S→C | Windows 控制模式开关 |
+| WINDOWS_INPUT_EVENT | 0x0071 | S→C | Mac 键鼠转发到 Windows |
 
 默认鼠标指针直接包含在视频帧中，以保证位置由 macOS 负责合成；独立鼠标通道仅在 `WIRED_MONITOR_CAPTURE_CURSOR=0` 且 `WIRED_MONITOR_SEPARATE_CURSOR=1` 时启用。
 
@@ -132,6 +134,40 @@ Payload:
 └──────────────┴──────────────┴──────────────┴──────────────┘
 ```
 
+### WINDOWS_CONTROL_MODE (0x0070)
+```
+Payload:
+┌──────────────┐
+│ Enabled      │
+│ uint8        │
+│ 0/1          │
+└──────────────┘
+```
+
+Mac 端全局热键 `Ctrl+Option+Command+W` 进入或退出 Windows 控制模式。
+进入后 Windows 客户端隐藏扩展屏窗口，退出后恢复窗口。
+
+### WINDOWS_INPUT_EVENT (0x0071)
+```
+Payload:
+┌──────────────┬──────────────┐
+│ EventType    │ EventData    │
+│ uint8        │ bytes...     │
+└──────────────┴──────────────┘
+
+EventType:
+  0x01 = MouseMove (x: int32, y: int32)
+  0x02 = MouseDown (button: uint8, x: int32, y: int32)
+  0x03 = MouseUp   (button: uint8, x: int32, y: int32)
+  0x04 = KeyDown   (windowsVirtualKey: uint16)
+  0x05 = KeyUp     (windowsVirtualKey: uint16)
+  0x06 = Scroll    (deltaX: int32, deltaY: int32)
+```
+
+鼠标坐标由 Mac 端按被捕获显示器 bounds 映射到 Windows 客户端上报的显示尺寸。
+Windows 端再将该坐标映射到承载客户端窗口的物理显示器区域，并通过 `SendInput` 注入。
+键盘采用 Mac 使用习惯映射：`Command -> Ctrl`，`Option -> Alt`，`Shift -> Shift`，`Control -> Ctrl`。
+
 ## Connection Flow
 
 ```
@@ -143,6 +179,8 @@ Windows (Client)                    Mac (Server)
      │<─── FRAME_H264 ─────────────────│
      │<─── FRAME_H264 ─────────────────│
      │<─── FRAME_H264 ─────────────────│
+     │<─── WINDOWS_CONTROL_MODE ───────│
+     │<─── WINDOWS_INPUT_EVENT ────────│
      │                                  │
      │──── INPUT_EVENT ────────────────>│
      │                                  │

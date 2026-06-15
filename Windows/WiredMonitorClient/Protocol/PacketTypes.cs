@@ -12,6 +12,8 @@ public enum PacketType : ushort
     InputEvent = 0x0040,
     Stats = 0x0050,
     CursorPosition = 0x0060,
+    WindowsControlMode = 0x0070,
+    WindowsInputEvent = 0x0071,
 }
 
 public static class ProtocolConstants
@@ -26,6 +28,17 @@ public static class ProtocolConstants
     public const int RawFrameMetadataSize = 16;
     public const int RawFrameMetadataWithSize = 28;
     public const int CursorPositionPayloadSize = 17;
+    public const int WindowsControlModePayloadSize = 1;
+}
+
+public enum WindowsInputEventType : byte
+{
+    MouseMove = 0x01,
+    MouseDown = 0x02,
+    MouseUp = 0x03,
+    KeyDown = 0x04,
+    KeyUp = 0x05,
+    Scroll = 0x06,
 }
 
 public readonly struct PacketHeader
@@ -192,6 +205,111 @@ public readonly struct CursorPositionPayload
             X = (int)BitConverter.ToUInt32(payload[8..12]),
             Y = (int)BitConverter.ToUInt32(payload[12..16]),
             Visible = payload[16] != 0,
+        };
+    }
+}
+
+public readonly struct WindowsControlModePayload
+{
+    public bool Enabled { get; init; }
+
+    public static WindowsControlModePayload Parse(byte[] payload, int payloadLength)
+    {
+        return Parse(payload.AsSpan(0, payloadLength));
+    }
+
+    public static WindowsControlModePayload Parse(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < ProtocolConstants.WindowsControlModePayloadSize)
+            throw new ArgumentException("Windows control mode payload is too short.", nameof(payload));
+
+        return new WindowsControlModePayload
+        {
+            Enabled = payload[0] != 0,
+        };
+    }
+}
+
+public readonly struct WindowsInputEventPayload
+{
+    public WindowsInputEventType EventType { get; init; }
+    public int X { get; init; }
+    public int Y { get; init; }
+    public byte Button { get; init; }
+    public ushort VirtualKey { get; init; }
+    public int DeltaX { get; init; }
+    public int DeltaY { get; init; }
+
+    public static WindowsInputEventPayload Parse(byte[] payload, int payloadLength)
+    {
+        return Parse(payload.AsSpan(0, payloadLength));
+    }
+
+    public static WindowsInputEventPayload Parse(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < 1)
+            throw new ArgumentException("Windows input payload is too short.", nameof(payload));
+
+        var eventType = (WindowsInputEventType)payload[0];
+        return eventType switch
+        {
+            WindowsInputEventType.MouseMove => ParseMouseMove(payload),
+            WindowsInputEventType.MouseDown or WindowsInputEventType.MouseUp => ParseMouseButton(eventType, payload),
+            WindowsInputEventType.KeyDown or WindowsInputEventType.KeyUp => ParseKey(eventType, payload),
+            WindowsInputEventType.Scroll => ParseScroll(payload),
+            _ => throw new ArgumentException($"Unknown Windows input event type: 0x{payload[0]:X2}", nameof(payload)),
+        };
+    }
+
+    private static WindowsInputEventPayload ParseMouseMove(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < 9)
+            throw new ArgumentException("Mouse move payload is too short.", nameof(payload));
+
+        return new WindowsInputEventPayload
+        {
+            EventType = WindowsInputEventType.MouseMove,
+            X = BitConverter.ToInt32(payload[1..5]),
+            Y = BitConverter.ToInt32(payload[5..9]),
+        };
+    }
+
+    private static WindowsInputEventPayload ParseMouseButton(WindowsInputEventType eventType, ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < 10)
+            throw new ArgumentException("Mouse button payload is too short.", nameof(payload));
+
+        return new WindowsInputEventPayload
+        {
+            EventType = eventType,
+            Button = payload[1],
+            X = BitConverter.ToInt32(payload[2..6]),
+            Y = BitConverter.ToInt32(payload[6..10]),
+        };
+    }
+
+    private static WindowsInputEventPayload ParseKey(WindowsInputEventType eventType, ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < 3)
+            throw new ArgumentException("Keyboard payload is too short.", nameof(payload));
+
+        return new WindowsInputEventPayload
+        {
+            EventType = eventType,
+            VirtualKey = BitConverter.ToUInt16(payload[1..3]),
+        };
+    }
+
+    private static WindowsInputEventPayload ParseScroll(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < 9)
+            throw new ArgumentException("Scroll payload is too short.", nameof(payload));
+
+        return new WindowsInputEventPayload
+        {
+            EventType = WindowsInputEventType.Scroll,
+            DeltaX = BitConverter.ToInt32(payload[1..5]),
+            DeltaY = BitConverter.ToInt32(payload[5..9]),
         };
     }
 }

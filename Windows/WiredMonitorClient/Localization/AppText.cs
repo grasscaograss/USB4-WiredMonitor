@@ -42,6 +42,8 @@ public static class AppText
     public static string DisconnectButton => IsChinese ? "断开" : "Disconnect";
     public static string FullscreenButton => IsChinese ? "全屏" : "Fullscreen";
     public static string ExitFullscreenButton => IsChinese ? "退出全屏" : "Exit full screen";
+    public static string WindowsControlButton => IsChinese ? "Windows 控制" : "Windows Control";
+    public static string WindowsControlActiveButton => IsChinese ? "正在控制" : "Controlling";
     public static string Connected => IsChinese ? "已连接" : "Connected";
     public static string NotConnected => IsChinese ? "未连接" : "Disconnected";
     public static string NotConnectedPrompt => IsChinese
@@ -57,6 +59,9 @@ public static class AppText
     public static string DetectingMacUsb4Ip => IsChinese ? "正在检测 Mac USB4 IP..." : "Detecting Mac USB4 IP...";
     public static string MacUsb4IpNotDetected => IsChinese ? "没有检测到 Mac USB4 IP" : "Mac USB4 IP was not detected";
     public static string ConnectionFailedShort => IsChinese ? "连接失败" : "Connection failed";
+    public static string WindowsControlHotkeyHint => IsChinese
+        ? "请在 Mac 端按 Ctrl+Option+Command+W 进入或退出 Windows 控制模式"
+        : "Press Ctrl+Option+Command+W on the Mac to enter or exit Windows control mode";
 
     public static string Usb4Host(string host) => $"USB4IP: {host}";
 

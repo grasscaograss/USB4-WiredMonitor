@@ -23,13 +23,15 @@ tuning, and hardware validation, not as a polished commercial display product.
 - Automatic Mac USB4 IP detection in the Windows client.
 - Optional macOS virtual display creation through `CGVirtualDisplay` runtime
   classes.
+- Windows Control Mode toggled with `Ctrl+Option+Command+W`, so the Mac
+  keyboard and mouse can temporarily control the real Windows desktop.
 - English and Simplified Chinese Windows UI.
 - Standalone network throughput and latency test utility.
 
 ## Current Limitations
 
-- Input forwarding is not implemented yet, so the project is currently focused
-  on display output.
+- Windows Control Mode targets the normal Windows desktop and normal apps. It
+  does not guarantee control over elevated windows or the UAC secure desktop.
 - Virtual display creation depends on macOS runtime support for
   `CGVirtualDisplay`. If it is unavailable, use main-display mirroring mode.
 - The Windows client intentionally requires hardware decoding; software decode
@@ -53,6 +55,8 @@ Protocol/                     Wire protocol documentation
 - Xcode Command Line Tools.
 - Swift Package Manager.
 - Screen Recording permission for the terminal app used to start the server.
+- Accessibility and Input Monitoring permissions for the terminal app used to
+  start the server when Windows Control Mode is needed.
 - A USB4/Thunderbolt port and cable.
 
 ### Windows
@@ -120,6 +124,29 @@ dotnet run
 You can leave the Mac address empty and click **Connect**; the client will try
 to find the Mac service over USB4 automatically. You can also type the Mac
 Thunderbolt Bridge IP manually.
+
+## Windows Control Mode
+
+When the Mac pointer is on the Windows external-display area and you need to
+briefly use the real Windows PC, press this hotkey on the Mac:
+
+```text
+Ctrl+Option+Command+W
+```
+
+The Windows client hides the external-display window, Mac keyboard/mouse input
+is forwarded over the same USB4/TB TCP connection, and Windows injects it into
+the normal desktop with `SendInput`. Press the same hotkey again to exit control
+mode and restore the Wired Monitor window.
+
+The default key mapping follows Mac habits: `Command` maps to Windows `Ctrl`,
+and `Option` maps to `Alt`, so `Command+C/V/A/Z` works as Windows copy, paste,
+select all, and undo.
+
+On first use, macOS may require Accessibility and Input Monitoring permissions
+for the terminal/app running `swift run`. Without those permissions, video still
+works but control mode is disabled. The first implementation is intended for the
+normal Windows desktop and normal applications, not the UAC secure desktop.
 
 ## Language
 

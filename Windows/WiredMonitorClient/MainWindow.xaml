@@ -60,6 +60,9 @@
                     <Button x:Name="FullscreenButton" Content="Fullscreen" Click="FullscreenButton_Click"
                             Width="108" Height="28" Margin="5,0"
                             Background="#FF444444" Foreground="White" BorderThickness="0"/>
+                    <Button x:Name="WindowsControlButton" Content="Windows Control" Click="WindowsControlButton_Click"
+                            Width="130" Height="28" Margin="5,0"
+                            Background="#FF444444" Foreground="White" BorderThickness="0" IsEnabled="False"/>
                 </StackPanel>
             </Grid>
         </Border>
