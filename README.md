@@ -1,25 +1,40 @@
 # USB4 Wired Monitor
 
-USB4 Wired Monitor uses USB4/Thunderbolt networking to use a Windows PC as an
-external display for a Mac.
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-The Mac side creates or captures a display, encodes frames with VideoToolbox,
-and streams them over TCP. The Windows side receives the stream, decodes it with
-FFmpeg hardware decoding, and renders it in a WPF window.
+USB4 Wired Monitor turns a Windows PC into a low-latency external display for a
+Mac over a direct USB4/Thunderbolt cable.
 
-> Status: experimental MVP. It is useful for local testing and development, but
-> it is not yet a polished replacement for a commercial remote display product.
+The project is built around the network interface that macOS and Windows expose
+for Thunderbolt/USB4 connections. The Mac creates or captures a display, encodes
+it with VideoToolbox, and sends the video stream over TCP. The Windows client
+receives the stream, decodes it with FFmpeg hardware acceleration, and presents
+it in a WPF window.
 
-## Features
+This is an experimental MVP. It is intended for local development, latency
+tuning, and hardware validation, not as a polished commercial display product.
 
-- TCP video stream over USB4/Thunderbolt networking.
-- Mac server written in Swift with CGDisplayStream/ScreenCaptureKit and
-  VideoToolbox.
-- Windows client written in C# WPF with FFmpeg hardware decoding and D3D11
-  rendering.
-- Automatic USB4 IP detection on Windows.
-- Optional macOS virtual display creation.
-- Network throughput and latency test utility.
+## Highlights
+
+- Direct TCP video stream over USB4/Thunderbolt networking.
+- macOS server in Swift with CGDisplayStream/ScreenCaptureKit and VideoToolbox.
+- Windows client in C# WPF with FFmpeg D3D11VA/DXVA2 hardware decoding.
+- Optional D3D11 direct rendering path on Windows.
+- Automatic Mac USB4 IP detection in the Windows client.
+- Optional macOS virtual display creation through `CGVirtualDisplay` runtime
+  classes.
+- English and Simplified Chinese Windows UI.
+- Standalone network throughput and latency test utility.
+
+## Current Limitations
+
+- Input forwarding is not implemented yet, so the project is currently focused
+  on display output.
+- Virtual display creation depends on macOS runtime support for
+  `CGVirtualDisplay`. If it is unavailable, use main-display mirroring mode.
+- The Windows client intentionally requires hardware decoding; software decode
+  fallback is rejected to keep latency predictable.
+- FFmpeg DLLs are not bundled in this repository.
 
 ## Repository Layout
 
@@ -32,56 +47,44 @@ Protocol/                     Wire protocol documentation
 
 ## Requirements
 
-### Mac
+### macOS
 
 - macOS 13 or later.
 - Xcode Command Line Tools.
 - Swift Package Manager.
-- Screen Recording permission for the terminal/app that starts the server.
+- Screen Recording permission for the terminal app used to start the server.
+- A USB4/Thunderbolt port and cable.
 
 ### Windows
 
 - Windows 10/11.
 - .NET 9 SDK for `Windows/WiredMonitorClient`.
 - .NET 10 SDK for `NetworkTest`.
-- A GPU/driver combination supported by FFmpeg D3D11VA or DXVA2 hardware
-  decoding.
+- A GPU and driver supported by FFmpeg D3D11VA or DXVA2 hardware decoding.
 - FFmpeg shared native libraries.
+- A USB4/Thunderbolt port and cable.
 
-### Cable And Network
+## Install FFmpeg On Windows
 
-- A USB4/Thunderbolt cable between the Mac and Windows machines.
-- Thunderbolt/USB4 networking enabled on both systems.
-- The machines usually receive link-local IPv4 addresses such as
-  `169.254.x.x`.
-
-## Install Dependencies
-
-### Windows FFmpeg Runtime
-
-The Windows client uses `FFmpeg.AutoGen`, but it still needs FFmpeg native
-shared libraries at runtime.
+The Windows client uses the `FFmpeg.AutoGen` NuGet package, but the FFmpeg native
+shared libraries must still be available at runtime.
 
 1. Download a Windows shared FFmpeg build, for example from
    [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds/releases).
-2. Extract the build.
-3. Copy the required DLLs into:
+2. Extract the archive.
+3. Copy the FFmpeg DLLs into the built client output folder:
 
 ```text
 Windows/WiredMonitorClient/bin/<Configuration>/net9.0-windows/ffmpeg/
 ```
 
-During development, `<Configuration>` is usually `Debug`.
-
-This repository does not redistribute FFmpeg binaries. If you package and
-redistribute FFmpeg with the app, you must comply with the license terms of the
-FFmpeg build you ship.
+For development, `<Configuration>` is usually `Debug`.
 
 ## Quick Start
 
-### 1. Connect USB4/Thunderbolt
+### 1. Connect The Machines
 
-Connect the Mac and Windows machines with a USB4/Thunderbolt cable.
+Connect the Mac and Windows PC with a USB4/Thunderbolt cable.
 
 On macOS, check:
 
@@ -95,6 +98,9 @@ On Windows, check:
 Settings -> Network & Internet -> Advanced network settings
 ```
 
+The two machines usually receive link-local IPv4 addresses such as
+`169.254.x.x`.
+
 ### 2. Start The Mac Server
 
 ```bash
@@ -102,7 +108,7 @@ cd Mac/WiredMonitorServer
 swift run
 ```
 
-The server listens on TCP port `9802` for the video stream.
+The server listens on TCP port `9802`.
 
 ### 3. Start The Windows Client
 
@@ -111,13 +117,30 @@ cd Windows\WiredMonitorClient
 dotnet run
 ```
 
-You can leave the Mac address field empty and click `连接`; the Windows client
-will try to detect the Mac over USB4 automatically. You can also enter the Mac
+You can leave the Mac address empty and click **Connect**; the client will try
+to find the Mac service over USB4 automatically. You can also type the Mac
 Thunderbolt Bridge IP manually.
+
+## Language
+
+The Windows UI follows the operating system language by default. It currently
+supports English and Simplified Chinese.
+
+You can switch language in the toolbar, or force a language before launch:
+
+```powershell
+$env:WIRED_MONITOR_LANG="en-US"
+dotnet run --project Windows\WiredMonitorClient
+```
+
+```powershell
+$env:WIRED_MONITOR_LANG="zh-CN"
+dotnet run --project Windows\WiredMonitorClient
+```
 
 ## Network Test
 
-The network test utility is useful before debugging video latency.
+Use `NetworkTest` before video debugging to confirm the USB4/TB link is healthy.
 
 Start the test server on one machine:
 
@@ -143,7 +166,7 @@ Run latency test:
 dotnet run --project NetworkTest -- ping <Mac-IP>
 ```
 
-## Useful Runtime Options
+## Runtime Options
 
 Set these environment variables before starting the corresponding process.
 
@@ -157,7 +180,7 @@ Set these environment variables before starting the corresponding process.
 | `WIRED_MONITOR_QUALITY` | `1.0` | VideoToolbox quality value. |
 | `WIRED_MONITOR_SCALE` | `1` | Capture scale, `0 < value <= 1`. |
 | `WIRED_MONITOR_CAPTURE` | `cgstream` | Capture mode: `cgstream`, `sck`, or `image`. |
-| `WIRED_MONITOR_CAPTURE_CURSOR` | `1` | Include macOS cursor in video frames. |
+| `WIRED_MONITOR_CAPTURE_CURSOR` | `1` | Include the macOS cursor in video frames. |
 | `WIRED_MONITOR_VIRTUAL_DISPLAY` | `1` | Enable virtual display creation. |
 | `WIRED_MONITOR_MIRROR_MAIN` | `0` | Set to `1` to stream the main display instead. |
 | `WIRED_MONITOR_VIRTUAL_WIDTH` | Client width | Override virtual display pixel width. |
@@ -175,9 +198,11 @@ WIRED_MONITOR_FPS=60 WIRED_MONITOR_BITRATE=120000000 swift run
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `WIRED_MONITOR_LANG` | System UI language | `en-US` or `zh-CN`. |
 | `WIRED_MONITOR_HWDEC` | Auto | Force `d3d11va` or `dxva2`. |
-| `WIRED_MONITOR_RENDERER` | Auto | Renderer selection. |
-| `WIRED_MONITOR_D3D11_DIRECT` | Auto | Enable or disable D3D11 direct path. |
+| `WIRED_MONITOR_RENDERER` | Auto | Set to `wpf` or `writeablebitmap` to bypass D3DImage. |
+| `WIRED_MONITOR_D3D11_DIRECT` | Auto | Set to `0` to disable D3D11 direct output. |
+| `WIRED_MONITOR_D3D11_COLOR_RANGE` | Limited | Set to `full` for full-range YUV conversion. |
 | `WIRED_MONITOR_CLIENT_WIDTH` | Current display | Override HELLO client width. |
 | `WIRED_MONITOR_CLIENT_HEIGHT` | Current display | Override HELLO client height. |
 | `WIRED_MONITOR_CLIENT_REFRESH` | Current display | Override reported refresh rate. |
@@ -197,20 +222,20 @@ dotnet run --project Windows\WiredMonitorClient -- --probe <Mac-IP> 9802
 
 ## Troubleshooting
 
-- If the Windows client cannot connect, run `NetworkTest discovery` and confirm
-  both machines have USB4/Thunderbolt IPv4 addresses.
-- If video is black, confirm FFmpeg DLLs are in the `ffmpeg/` folder under the
+- Cannot connect: run `NetworkTest discovery` and confirm both machines have
+  USB4/Thunderbolt IPv4 addresses.
+- Black screen: confirm FFmpeg DLLs are inside the `ffmpeg/` folder under the
   built Windows output directory.
-- If decoding fails, try forcing a hardware decoder:
+- Hardware decode failure: try forcing the decoder:
 
 ```powershell
 $env:WIRED_MONITOR_HWDEC="d3d11va"
 dotnet run --project Windows\WiredMonitorClient
 ```
 
-- If macOS captures the wrong display, disable fallback capture and check the
-  server logs for the selected display ID.
-- If the Mac server cannot create a virtual display, try:
+- Wrong display captured on macOS: check the Mac server logs for the selected
+  display ID and avoid capture fallback unless you need it.
+- Virtual display unavailable: use main-display mirroring mode:
 
 ```bash
 WIRED_MONITOR_MIRROR_MAIN=1 swift run
@@ -223,8 +248,7 @@ types.
 
 ## License
 
-This project's own source code is licensed under the MIT License. See
-[LICENSE](LICENSE).
+This project's own source code is licensed under the [MIT License](LICENSE).
 
 Third-party dependencies keep their own licenses:
 
@@ -234,5 +258,6 @@ Third-party dependencies keep their own licenses:
 - Apple frameworks and Microsoft/.NET components are governed by their
   respective platform licenses.
 
-If you redistribute binaries, especially binaries that include FFmpeg DLLs, make
-sure your distribution complies with all applicable third-party license terms.
+This repository does not redistribute FFmpeg binaries. If you publish a binary
+release that includes FFmpeg DLLs, make sure that release complies with the
+license terms of the FFmpeg build you ship.

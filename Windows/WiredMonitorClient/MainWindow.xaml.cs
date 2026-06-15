@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging;
 using WiredMonitorClient.Decoder;
 using WiredMonitorClient.Diagnostics;
 using WiredMonitorClient.Display;
+using WiredMonitorClient.Localization;
 using WiredMonitorClient.Network;
 using WiredMonitorClient.Protocol;
 using WiredMonitorClient.Rendering;
@@ -20,6 +21,13 @@ namespace WiredMonitorClient;
 public partial class MainWindow : Window
 {
     private readonly record struct QueuedH264Frame(FramePayload Payload, VideoDecoderCodec Codec, bool SuppressOutput);
+    private enum Usb4IpStatusKind
+    {
+        Detecting,
+        Found,
+        NotFound,
+        Error,
+    }
 
     private const int ReceiveBackpressureHighWatermark = 6;
     private const int ReceiveBackpressureLowWatermark = 2;
@@ -85,6 +93,9 @@ public partial class MainWindow : Window
     private bool _isLocalCursorOverDisplay;
     private bool _isLocalCursorHidden;
     private Point? _lastLocalCursorPosition;
+    private bool _applyingLocalization;
+    private Usb4IpStatusKind _usb4IpStatus = Usb4IpStatusKind.Detecting;
+    private string? _usb4IpStatusHost;
 
     public MainWindow()
     {
@@ -113,6 +124,7 @@ public partial class MainWindow : Window
         _renderer.OnImageSourceChanged += OnImageSourceChanged;
         DisplayHost.SizeChanged += (_, _) => UpdateDisplayImageLayout();
         Loaded += (_, _) => StartUsb4IpAutoDetection();
+        LanguageComboBox.SelectionChanged += LanguageComboBox_SelectionChanged;
 
         _localCursorIdleTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -122,6 +134,7 @@ public partial class MainWindow : Window
         DisplayHost.MouseEnter += OnDisplayHostMouseEnter;
         DisplayHost.MouseMove += OnDisplayHostMouseMove;
         DisplayHost.MouseLeave += OnDisplayHostMouseLeave;
+        InitializeLocalization();
     }
 
     private async void ConnectButton_Click(object sender, RoutedEventArgs e)
@@ -134,16 +147,16 @@ public partial class MainWindow : Window
         _manualDisconnectRequested = false;
         _autoReconnectCts?.Cancel();
         ConnectButton.IsEnabled = false;
-        StatusText.Text = $"正在连接 {host}:{port}...";
+        StatusText.Text = AppText.Connecting(host, port);
 
         try
         {
             if (string.IsNullOrWhiteSpace(host))
             {
-                StatusText.Text = "正在检测 Mac USB4 IP...";
+                StatusText.Text = AppText.DetectingMacUsb4Ip;
                 var detected = await Usb4IpDetector.DetectAsync(port);
                 if (detected == null)
-                    throw new InvalidOperationException("没有检测到 Mac USB4 IP");
+                    throw new InvalidOperationException(AppText.MacUsb4IpNotDetected);
 
                 ApplyDetectedUsb4Ip(detected);
                 host = detected.Host;
@@ -158,9 +171,9 @@ public partial class MainWindow : Window
         {
             Console.WriteLine($"[UI] 连接异常: {ex}");
             DiagLog.Write(ex, "连接异常");
-            MessageBox.Show($"连接失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(AppText.ConnectionFailed(ex.Message), AppText.ErrorTitle, MessageBoxButton.OK, MessageBoxImage.Error);
             ConnectButton.IsEnabled = true;
-            StatusText.Text = "连接失败";
+            StatusText.Text = AppText.ConnectionFailedShort;
         }
     }
 
@@ -210,7 +223,6 @@ public partial class MainWindow : Window
             WindowStyle = _previousWindowStyle;
             ResizeMode = _previousResizeMode;
             WindowState = _previousWindowState;
-            FullscreenButton.Content = "全屏";
             _isFullscreen = false;
         }
         else
@@ -224,9 +236,56 @@ public partial class MainWindow : Window
             WindowStyle = WindowStyle.None;
             ResizeMode = ResizeMode.NoResize;
             WindowState = WindowState.Maximized;
-            FullscreenButton.Content = "退出全屏";
             _isFullscreen = true;
         }
+
+        UpdateFullscreenButtonText();
+    }
+
+    private void InitializeLocalization()
+    {
+        _applyingLocalization = true;
+        LanguageComboBox.SelectedIndex = AppText.Current == UiLanguage.Chinese ? 1 : 0;
+        _applyingLocalization = false;
+        ApplyLocalization();
+    }
+
+    private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_applyingLocalization || LanguageComboBox.SelectedItem is not ComboBoxItem item)
+            return;
+
+        AppText.Use(AppText.FromCode(item.Tag?.ToString()));
+        ApplyLocalization();
+    }
+
+    private void ApplyLocalization()
+    {
+        Title = AppText.WindowTitle;
+        MacAddressLabel.Text = AppText.MacAddressLabel;
+        PortLabel.Text = AppText.PortLabel;
+        LanguageLabel.Text = AppText.LanguageLabel;
+        ConnectButton.Content = AppText.ConnectButton;
+        DisconnectButton.Content = AppText.DisconnectButton;
+        UpdateFullscreenButtonText();
+        ConnectionStatus.Text = _receiver.IsConnected ? AppText.Connected : AppText.NotConnected;
+        UpdateUsb4IpStatusText();
+
+        if (!_receiver.IsConnected)
+        {
+            StatusText.Text = _lastReceiveError == null
+                ? AppText.NotConnectedPrompt
+                : AppText.ReceiveInterrupted(_lastReceiveError);
+        }
+        else if (!_hasDecodedFrame && StatusText.Visibility == Visibility.Visible)
+        {
+            StatusText.Text = AppText.WaitingVideoData;
+        }
+    }
+
+    private void UpdateFullscreenButtonText()
+    {
+        FullscreenButton.Content = _isFullscreen ? AppText.ExitFullscreenButton : AppText.FullscreenButton;
     }
 
     private void OnDisplayHostMouseEnter(object sender, MouseEventArgs e)
@@ -297,8 +356,8 @@ public partial class MainWindow : Window
                 _autoReconnectAttempt = 0;
                 _manualDisconnectRequested = false;
                 StatusDot.Fill = System.Windows.Media.Brushes.LimeGreen;
-                ConnectionStatus.Text = "已连接";
-                StatusText.Text = "等待画面数据...";
+                ConnectionStatus.Text = AppText.Connected;
+                StatusText.Text = AppText.WaitingVideoData;
                 StatusText.Foreground = System.Windows.Media.Brushes.White;
                 ConnectButton.IsEnabled = false;
                 DisconnectButton.IsEnabled = true;
@@ -332,10 +391,10 @@ public partial class MainWindow : Window
             else
             {
                 StatusDot.Fill = System.Windows.Media.Brushes.Red;
-                ConnectionStatus.Text = "未连接";
+                ConnectionStatus.Text = AppText.NotConnected;
                 StatusText.Text = _lastReceiveError == null
-                    ? "未连接 - 请输入 Mac 的 Thunderbolt IP 地址"
-                    : $"接收中断: {_lastReceiveError}";
+                    ? AppText.NotConnectedPrompt
+                    : AppText.ReceiveInterrupted(_lastReceiveError);
                 StatusText.Visibility = Visibility.Visible;
                 DisplayImage.Source = null;
                 RemoteCursor.Visibility = Visibility.Collapsed;
@@ -381,7 +440,7 @@ public partial class MainWindow : Window
 
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    StatusText.Text = $"连接中断，正在自动重连 #{attempt}...";
+                    StatusText.Text = AppText.AutoReconnecting(attempt);
                     StatusText.Visibility = Visibility.Visible;
                     StatusText.Foreground = System.Windows.Media.Brushes.White;
                     ConnectButton.IsEnabled = false;
@@ -412,7 +471,7 @@ public partial class MainWindow : Window
                 DiagLog.Write(ex, $"自动重连失败: attempt={attempt}");
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    StatusText.Text = $"自动重连失败，继续重试: {ex.Message}";
+                    StatusText.Text = AppText.AutoReconnectFailed(ex.Message);
                     StatusText.Visibility = Visibility.Visible;
                     StatusText.Foreground = System.Windows.Media.Brushes.Orange;
                     ConnectButton.IsEnabled = true;
@@ -445,8 +504,7 @@ public partial class MainWindow : Window
                 {
                     await Dispatcher.InvokeAsync(() =>
                     {
-                        Usb4IpStatusText.Text = $"USB4IP: {HostTextBox.Text.Trim()}";
-                        Usb4IpStatusText.Foreground = Brushes.LimeGreen;
+                        SetUsb4IpStatus(Usb4IpStatusKind.Found, HostTextBox.Text.Trim());
                     });
                     await Task.Delay(TimeSpan.FromSeconds(10), ct);
                     continue;
@@ -458,8 +516,7 @@ public partial class MainWindow : Window
 
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    Usb4IpStatusText.Text = "USB4IP: 检测中";
-                    Usb4IpStatusText.Foreground = Brushes.LightGray;
+                    SetUsb4IpStatus(Usb4IpStatusKind.Detecting);
                 });
 
                 var result = await Usb4IpDetector.DetectAsync(target.Port, target.CurrentHost, ct);
@@ -472,8 +529,7 @@ public partial class MainWindow : Window
                 {
                     await Dispatcher.InvokeAsync(() =>
                     {
-                        Usb4IpStatusText.Text = "USB4IP: 未找到";
-                        Usb4IpStatusText.Foreground = Brushes.Orange;
+                        SetUsb4IpStatus(Usb4IpStatusKind.NotFound);
                     });
                     await Task.Delay(TimeSpan.FromSeconds(8), ct);
                 }
@@ -487,10 +543,34 @@ public partial class MainWindow : Window
             DiagLog.Write(ex, "USB4IP 自动检测异常");
             await Dispatcher.InvokeAsync(() =>
             {
-                Usb4IpStatusText.Text = "USB4IP: 检测异常";
-                Usb4IpStatusText.Foreground = Brushes.Orange;
+                SetUsb4IpStatus(Usb4IpStatusKind.Error);
             });
         }
+    }
+
+    private void SetUsb4IpStatus(Usb4IpStatusKind status, string? host = null)
+    {
+        _usb4IpStatus = status;
+        _usb4IpStatusHost = host;
+        UpdateUsb4IpStatusText();
+    }
+
+    private void UpdateUsb4IpStatusText()
+    {
+        Usb4IpStatusText.Text = _usb4IpStatus switch
+        {
+            Usb4IpStatusKind.Found => AppText.Usb4Host(_usb4IpStatusHost ?? HostTextBox.Text.Trim()),
+            Usb4IpStatusKind.NotFound => AppText.Usb4NotFound,
+            Usb4IpStatusKind.Error => AppText.Usb4Error,
+            _ => AppText.Usb4Detecting,
+        };
+
+        Usb4IpStatusText.Foreground = _usb4IpStatus switch
+        {
+            Usb4IpStatusKind.Found => Brushes.LimeGreen,
+            Usb4IpStatusKind.NotFound or Usb4IpStatusKind.Error => Brushes.Orange,
+            _ => Brushes.LightGray,
+        };
     }
 
     private void ApplyDetectedUsb4Ip(Usb4IpDetectionResult result)
@@ -498,8 +578,7 @@ public partial class MainWindow : Window
         _lastHost = result.Host;
         _lastPort = result.Port;
 
-        Usb4IpStatusText.Text = $"USB4IP: {result.Host}";
-        Usb4IpStatusText.Foreground = Brushes.LimeGreen;
+        SetUsb4IpStatus(Usb4IpStatusKind.Found, result.Host);
 
         if (!_receiver.IsConnected &&
             !HostTextBox.IsKeyboardFocusWithin &&
@@ -512,7 +591,7 @@ public partial class MainWindow : Window
 
         if (!_receiver.IsConnected && StatusText.Visibility == Visibility.Visible)
         {
-            StatusText.Text = $"检测到 Mac USB4 IP: {result.Host}";
+            StatusText.Text = AppText.DetectedMacUsb4Ip(result.Host);
             StatusText.Foreground = Brushes.White;
         }
     }
@@ -543,8 +622,8 @@ public partial class MainWindow : Window
             Dispatcher.Invoke(() =>
             {
                 StatusText.Text = frame.IsKeyFrame
-                    ? $"收到 {codecName} 关键帧 #{frame.FrameIndex}，正在解码..."
-                    : $"收到 {codecName} 帧 #{frame.FrameIndex}，等待解码输出...";
+                    ? AppText.ReceivedKeyFrame(codecName, frame.FrameIndex)
+                    : AppText.ReceivedFrameWaitingDecoder(codecName, frame.FrameIndex);
                 StatusText.Foreground = System.Windows.Media.Brushes.White;
             });
         }
@@ -556,7 +635,7 @@ public partial class MainWindow : Window
             {
                 Dispatcher.Invoke(() =>
                 {
-                    StatusText.Text = $"接收中 (无解码器) FPS: {_frameCount} 累计: {_totalBytes / 1024}KB";
+                    StatusText.Text = AppText.ReceivingNoDecoder(_frameCount, _totalBytes / 1024);
                 });
             }
             return;
@@ -772,11 +851,11 @@ public partial class MainWindow : Window
                     _h264Decoder.Dispose();
                     _h264Decoder = null;
                     _decoderFailed = true;
-                Dispatcher.Invoke(() =>
-                {
-                    StatusText.Text = $"{codec} 硬件解码器初始化失败 - 需要支持 D3D11VA/DXVA2 的 GPU 和 FFmpeg 库";
-                    StatusText.Foreground = System.Windows.Media.Brushes.Orange;
-                });
+                    Dispatcher.Invoke(() =>
+                    {
+                        StatusText.Text = AppText.HardwareDecoderInitFailed(codec.ToString());
+                        StatusText.Foreground = System.Windows.Media.Brushes.Orange;
+                    });
                 }
             }
             catch (Exception ex)
@@ -788,7 +867,7 @@ public partial class MainWindow : Window
                 _decoderFailed = true;
                 Dispatcher.Invoke(() =>
                 {
-                    StatusText.Text = $"解码器不可用: {ex.Message}";
+                    StatusText.Text = AppText.DecoderUnavailable(ex.Message);
                     StatusText.Foreground = System.Windows.Media.Brushes.Orange;
                 });
             }
@@ -989,7 +1068,7 @@ public partial class MainWindow : Window
         DiagLog.Write($"接收错误: {message}");
         Dispatcher.Invoke(() =>
         {
-            StatusText.Text = $"接收中断: {message}";
+            StatusText.Text = AppText.ReceiveInterrupted(message);
             StatusText.Visibility = Visibility.Visible;
             StatusText.Foreground = System.Windows.Media.Brushes.Orange;
         });
@@ -1015,7 +1094,7 @@ public partial class MainWindow : Window
             Dispatcher.Invoke(() =>
             {
                 FpsText.Text = $"FPS: {fps:F0}";
-                FrameSizeText.Text = $"带宽: {avgMbps:F1} Mbps";
+                FrameSizeText.Text = AppText.Bandwidth(avgMbps);
             });
         }
     }
