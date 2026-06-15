@@ -151,11 +151,11 @@ class H264Encoder {
             outputCallback: { outputCallbackRefCon, _, status, _, sampleBuffer in
                 let enc = Unmanaged<H264Encoder>.fromOpaque(outputCallbackRefCon!).takeUnretainedValue()
                 guard status == noErr else {
-                    print("[编码器] 输出回调失败: \(status)")
+                    print("\(ServerText.encoderTag) \(ServerText.text("输出回调失败", "output callback failed")): \(status)")
                     return
                 }
                 guard let sampleBuffer = sampleBuffer else {
-                    print("[编码器] 输出回调 sampleBuffer 为 nil")
+                    print("\(ServerText.encoderTag) \(ServerText.text("输出回调 sampleBuffer 为 nil", "output callback sampleBuffer is nil"))")
                     return
                 }
                 enc.handleEncodedFrame(sampleBuffer: sampleBuffer)
@@ -165,21 +165,21 @@ class H264Encoder {
         )
 
         guard status == noErr, let session = session else {
-            print("[编码器] 创建失败: \(status)")
+            print("\(ServerText.encoderTag) \(ServerText.text("创建失败", "creation failed")): \(status)")
             return false
         }
 
         var err: OSStatus
 
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        if err != noErr { print("[编码器] 设置 RealTime 失败: \(err)") }
+        if err != noErr { print("\(ServerText.encoderTag) \(ServerText.text("设置 RealTime 失败", "failed to set RealTime")): \(err)") }
 
         let profile = Self.profileLevel(codec: codec)
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: profile.value as AnyObject)
-        if err != noErr { print("[编码器] 设置 ProfileLevel 失败: \(err)") }
+        if err != noErr { print("\(ServerText.encoderTag) \(ServerText.text("设置 ProfileLevel 失败", "failed to set ProfileLevel")): \(err)") }
 
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitRate))
-        if err != noErr { print("[编码器] 设置 BitRate 失败: \(err)") }
+        if err != noErr { print("\(ServerText.encoderTag) \(ServerText.text("设置 BitRate 失败", "failed to set BitRate")): \(err)") }
 
         // DataRateLimits: [bytes, seconds]
         let dataRateLimits = [
@@ -187,35 +187,35 @@ class H264Encoder {
             NSNumber(value: 1),
         ] as CFArray
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: dataRateLimits)
-        if err != noErr { print("[编码器] 设置 DataRateLimits 失败: \(err)") }
+        if err != noErr { print("\(ServerText.encoderTag) \(ServerText.text("设置 DataRateLimits 失败", "failed to set DataRateLimits")): \(err)") }
 
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 0))
-        if err != noErr { print("[编码器] 设置 MaxFrameDelay 失败: \(err)") }
+        if err != noErr { print("\(ServerText.encoderTag) \(ServerText.text("设置 MaxFrameDelay 失败", "failed to set MaxFrameDelay")): \(err)") }
 
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        if err != noErr { print("[编码器] 设置 FrameReordering 失败: \(err)") }
+        if err != noErr { print("\(ServerText.encoderTag) \(ServerText.text("设置 FrameReordering 失败", "failed to set FrameReordering")): \(err)") }
 
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: fps))
-        if err != noErr { print("[编码器] 设置 ExpectedFrameRate 失败: \(err)") }
+        if err != noErr { print("\(ServerText.encoderTag) \(ServerText.text("设置 ExpectedFrameRate 失败", "failed to set ExpectedFrameRate")): \(err)") }
 
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: keyFrameInterval))
-        if err != noErr { print("[编码器] 设置 MaxKeyFrameInterval 失败: \(err)") }
+        if err != noErr { print("\(ServerText.encoderTag) \(ServerText.text("设置 MaxKeyFrameInterval 失败", "failed to set MaxKeyFrameInterval")): \(err)") }
 
         let keyFrameIntervalDuration = Double(keyFrameInterval) / Double(max(fps, 1))
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: NSNumber(value: keyFrameIntervalDuration))
-        if err != noErr { print("[编码器] 设置 MaxKeyFrameIntervalDuration 失败: \(err)") }
+        if err != noErr { print("\(ServerText.encoderTag) \(ServerText.text("设置 MaxKeyFrameIntervalDuration 失败", "failed to set MaxKeyFrameIntervalDuration")): \(err)") }
 
         err = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_Quality, value: NSNumber(value: quality))
-        if err != noErr { print("[编码器] 设置 Quality 失败: \(err)") }
+        if err != noErr { print("\(ServerText.encoderTag) \(ServerText.text("设置 Quality 失败", "failed to set Quality")): \(err)") }
 
         err = VTCompressionSessionPrepareToEncodeFrames(session)
         guard err == noErr else {
-            print("[编码器] 准备失败: \(err)")
+            print("\(ServerText.encoderTag) \(ServerText.text("准备失败", "prepare failed")): \(err)")
             return false
         }
 
         self.session = session
-        print("[编码器] \(codec.name) 编码器已启动 (\(width)x\(height) @ \(fps)fps), 码率: \(Double(bitRate) / 1_000_000.0) Mbps, 关键帧间隔: \(keyFrameInterval), sync=\(completeEveryFrame), flushInterval=\(completeFrameInterval), quality=\(quality), profile=\(profile.name)")
+        print("\(ServerText.encoderTag) \(codec.name) \(ServerText.text("编码器已启动", "encoder started")) (\(width)x\(height) @ \(fps)fps), \(ServerText.text("码率", "bitrate")): \(Double(bitRate) / 1_000_000.0) Mbps, \(ServerText.text("关键帧间隔", "key interval")): \(keyFrameInterval), sync=\(completeEveryFrame), flushInterval=\(completeFrameInterval), quality=\(quality), profile=\(profile.name)")
         return true
     }
 
@@ -272,7 +272,7 @@ class H264Encoder {
             let elapsed = now.timeIntervalSince(lastInputReportTime)
             let inputFps = Double(encodeInputCount - lastReportedInputCount) / elapsed
             let outputFps = Double(encodeOutputCount - lastReportedOutputCount) / elapsed
-            print("[编码器] 输入 FPS: \(String(format: "%.1f", inputFps)), 输出 FPS: \(String(format: "%.1f", outputFps)), totalIn=\(encodeInputCount), totalOut=\(encodeOutputCount)")
+            print("\(ServerText.encoderTag) \(ServerText.text("输入 FPS", "input FPS")): \(String(format: "%.1f", inputFps)), \(ServerText.text("输出 FPS", "output FPS")): \(String(format: "%.1f", outputFps)), totalIn=\(encodeInputCount), totalOut=\(encodeOutputCount)")
             lastInputReportTime = now
             lastReportedInputCount = encodeInputCount
             lastReportedOutputCount = encodeOutputCount
@@ -301,7 +301,7 @@ class H264Encoder {
         )
 
         if status != noErr {
-            print("[编码器] EncodeFrame 失败: \(status)")
+            print("\(ServerText.encoderTag) EncodeFrame \(ServerText.text("失败", "failed")): \(status)")
             timestampLock.lock()
             frameTimestamps.removeValue(forKey: presentationTime.value)
             timestampLock.unlock()
@@ -325,12 +325,12 @@ class H264Encoder {
         timestampLock.lock()
         frameTimestamps.removeAll()
         timestampLock.unlock()
-        print("[编码器] 已停止")
+        print("\(ServerText.encoderTag) \(ServerText.text("已停止", "stopped"))")
     }
 
     private func handleEncodedFrame(sampleBuffer: CMSampleBuffer) {
         guard sampleBuffer.numSamples > 0 else {
-            print("[编码器] sampleBuffer 无样本")
+            print("\(ServerText.encoderTag) sampleBuffer \(ServerText.text("无样本", "has no samples"))")
             return
         }
 
@@ -342,12 +342,12 @@ class H264Encoder {
         if isKeyFrame {
             spsPPS = extractParameterSets(from: sampleBuffer)
             if spsPPS == nil {
-                print("[编码器] 关键帧未取到参数集")
+                print("\(ServerText.encoderTag) \(ServerText.text("关键帧未取到参数集", "failed to get parameter sets from key frame"))")
             }
         }
 
         guard let sliceData = extractSliceData(from: sampleBuffer) else {
-            print("[编码器] 未取到 slice data")
+            print("\(ServerText.encoderTag) \(ServerText.text("未取到 slice data", "failed to get slice data"))")
             return
         }
 
@@ -361,7 +361,7 @@ class H264Encoder {
         let timestamp = takeFrameTimestamp(presentationTime: presentationTime)
         encodeOutputCount += 1
         if encodeOutputCount <= 3 || isKeyFrame {
-            print("[编码器] 输出帧 #\(encodeOutputCount), key=\(isKeyFrame), bytes=\(nalData.count)")
+            print("\(ServerText.encoderTag) \(ServerText.text("输出帧", "output frame")) #\(encodeOutputCount), key=\(isKeyFrame), bytes=\(nalData.count)")
         }
         onNALUnit?(nalData, isKeyFrame, frameIndex, timestamp)
     }

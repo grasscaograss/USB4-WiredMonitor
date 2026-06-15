@@ -109,7 +109,7 @@ dotnet run
 
 ## 语言
 
-Windows 客户端默认跟随系统界面语言，目前支持英文和简体中文。
+Windows 客户端界面和 Mac 服务端日志默认跟随系统语言，目前支持英文和简体中文。
 
 你可以在工具栏里切换语言，也可以在启动前通过环境变量强制指定：
 
@@ -159,6 +159,7 @@ dotnet run --project NetworkTest -- ping <Mac-IP>
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
+| `WIRED_MONITOR_LANG` | 系统语言 | `en-US` 或 `zh-CN`；控制 Mac 服务端日志语言。 |
 | `WIRED_MONITOR_FPS` | 客户端刷新率，最高 60 | 视频流 FPS，最高 120。 |
 | `WIRED_MONITOR_BITRATE` | 自动 | 视频码率，单位 bit/s。 |
 | `WIRED_MONITOR_CODEC` | `h264` | `h264` 或 `hevc`。 |

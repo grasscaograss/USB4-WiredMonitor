@@ -36,13 +36,13 @@ final class CursorTracker {
         }
         timer.resume()
         self.timer = timer
-        print("[鼠标] 独立 cursor 通道已启动 @ \(fps)Hz")
+        print("\(ServerText.cursorTag) \(ServerText.text("独立 cursor 通道已启动", "Separate cursor channel started")) @ \(fps)Hz")
     }
 
     func stop() {
         timer?.cancel()
         timer = nil
-        print("[鼠标] 独立 cursor 通道已停止")
+        print("\(ServerText.cursorTag) \(ServerText.text("独立 cursor 通道已停止", "Separate cursor channel stopped"))")
     }
 
     private func pollCursor() {

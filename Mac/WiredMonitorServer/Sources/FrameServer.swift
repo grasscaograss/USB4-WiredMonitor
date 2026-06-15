@@ -57,13 +57,13 @@ class FrameServer {
         do {
             listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
         } catch {
-            print("[服务端] 创建监听器失败: \(error)")
+            print("\(ServerText.serverTag) \(ServerText.text("创建监听器失败", "failed to create listener")): \(error)")
             return false
         }
 
         listener?.stateUpdateHandler = { state in
             if case .ready = state {
-                print("[服务端] TCP 监听端口 \(self.port)")
+                print("\(ServerText.serverTag) TCP \(ServerText.text("监听端口", "listening on port")) \(self.port)")
             }
         }
 
@@ -71,7 +71,7 @@ class FrameServer {
             conn.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    print("[服务端] 客户端已连接: \(conn.endpoint)")
+                    print("\(ServerText.serverTag) \(ServerText.text("客户端已连接", "client connected")): \(conn.endpoint)")
                     let wasEmpty = self?.connections.isEmpty ?? true
                     self?.connections.append(conn)
                     self?.receiveControlPackets(from: conn)
@@ -102,7 +102,7 @@ class FrameServer {
         pendingFramePackets.removeAll()
         pendingRealtimePackets.removeAll()
         receiveBuffers.removeAll()
-        print("[服务端] 已停止")
+        print("\(ServerText.serverTag) \(ServerText.text("已停止", "stopped"))")
     }
 
     func sendFrame(data: Data, packetType: PacketType, cacheForNewClients: Bool = true) {
@@ -164,7 +164,7 @@ class FrameServer {
 
             self.queue.async {
                 if let error = error {
-                    print("[服务端] 发送失败: \(error)")
+                    print("\(ServerText.serverTag) \(ServerText.text("发送失败", "send failed")): \(error)")
                     self.removeConnection(conn)
                     return
                 }
@@ -190,7 +190,7 @@ class FrameServer {
                 return
             }
 
-            print("[服务端] 发送超时 \(String(format: "%.1f", timeout))s，重置客户端连接")
+            print("\(ServerText.serverTag) \(ServerText.text("发送超时", "send timeout")) \(String(format: "%.1f", timeout))s, \(ServerText.text("重置客户端连接", "resetting client connection"))")
             conn.cancel()
             self.removeConnection(conn)
         }
@@ -242,7 +242,7 @@ class FrameServer {
         let now = Date()
         guard droppedPendingFrames > 0, now.timeIntervalSince(lastDropReportTime) >= 1.0 else { return }
 
-        print("[服务端] 发送队列丢弃旧帧: \(droppedPendingFrames)")
+        print("\(ServerText.serverTag) \(ServerText.text("发送队列丢弃旧帧", "send queue dropped stale frames")): \(droppedPendingFrames)")
         droppedPendingFrames = 0
         lastDropReportTime = now
     }
@@ -263,7 +263,7 @@ class FrameServer {
 
                 if isComplete || error != nil {
                     if let error {
-                        print("[服务端] 控制接收失败: \(error)")
+                        print("\(ServerText.serverTag) \(ServerText.text("控制接收失败", "control receive failed")): \(error)")
                     }
                     self.removeConnection(conn)
                     return
@@ -283,13 +283,13 @@ class FrameServer {
         while buffer.count >= PacketHeader.size {
             let headerData = buffer.prefix(PacketHeader.size)
             guard let header = PacketHeader.decode(Data(headerData)) else {
-                print("[服务端] 收到无效控制包头，丢弃 \(buffer.count) 字节")
+                print("\(ServerText.serverTag) \(ServerText.text("收到无效控制包头，丢弃", "received invalid control packet header, dropping")) \(buffer.count) \(ServerText.text("字节", "bytes"))")
                 buffer.removeAll()
                 break
             }
 
             if header.payloadLength > UInt32(FrameServer.maxControlPayloadLength) {
-                print("[服务端] 控制包过大: \(header.payloadLength)")
+                print("\(ServerText.serverTag) \(ServerText.text("控制包过大", "control packet too large")): \(header.payloadLength)")
                 buffer.removeAll()
                 break
             }
@@ -311,7 +311,7 @@ class FrameServer {
         switch header.type {
         case .hello:
             guard payload.count >= 12 else {
-                print("[服务端] HELLO payload 过短: \(payload.count)")
+                print("\(ServerText.serverTag) HELLO payload \(ServerText.text("过短", "too short")): \(payload.count)")
                 return
             }
 
@@ -321,7 +321,7 @@ class FrameServer {
                 refreshRate: Int(readUInt32(payload, offset: 8)),
                 dpi: payload.count >= 16 ? Int(readUInt32(payload, offset: 12)) : 0)
             lastClientDisplayInfo = info
-            print("[服务端] 收到客户端显示信息: \(info.width)x\(info.height) @ \(info.refreshRate)Hz, dpi=\(info.dpi)")
+            print("\(ServerText.serverTag) \(ServerText.text("收到客户端显示信息", "received client display info")): \(info.width)x\(info.height) @ \(info.refreshRate)Hz, dpi=\(info.dpi)")
             notifyFirstClientIfNeeded(info: info)
 
         default:

@@ -30,10 +30,7 @@ struct WiredMonitorServer {
     private static var activeRuntime: StreamRuntime?
 
     static func main() async {
-        print("╔══════════════════════════════════════════╗")
-        print("║   Wired Monitor Server - Mac 扩展屏      ║")
-        print("║   通过 Thunderbolt/USB4 传输屏幕画面      ║")
-        print("╚══════════════════════════════════════════╝")
+        ServerText.bannerLines.forEach { print($0) }
         print()
 
         let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
@@ -41,19 +38,19 @@ struct WiredMonitorServer {
 
         let server = FrameServer(port: VideoPort)
         guard server.start() else {
-            print("[主] 服务端启动失败")
+            print("\(ServerText.mainTag) \(ServerText.text("服务端启动失败", "Failed to start server"))")
             return
         }
 
-        print("[主] 服务已启动，等待 Windows 客户端连接后创建 Mac 虚拟副屏...")
-        print("[主] 视频流端口: \(VideoPort)")
+        print("\(ServerText.mainTag) \(ServerText.text("服务已启动，等待 Windows 客户端连接后创建 Mac 虚拟副屏...", "Server started. Waiting for a Windows client before creating the Mac virtual display..."))")
+        print("\(ServerText.mainTag) \(ServerText.text("视频流端口", "Video stream port")): \(VideoPort)")
         print()
 
         server.onFirstClientConnected = { clientInfo in
             Task {
                 guard !hasActiveRuntime() else { return }
 
-                print("[主] 客户端已连接，准备虚拟显示与屏幕捕获...")
+                print("\(ServerText.mainTag) \(ServerText.text("客户端已连接，准备虚拟显示与屏幕捕获...", "Client connected. Preparing virtual display and screen capture..."))")
                 guard let runtime = await configureAndStartStreaming(server: server, clientInfo: clientInfo) else {
                     return
                 }
@@ -65,7 +62,7 @@ struct WiredMonitorServer {
         }
 
         signalSource.setEventHandler {
-            print("\n[主] 正在关闭...")
+            print("\n\(ServerText.mainTag) \(ServerText.text("正在关闭...", "Shutting down..."))")
             let runtime = takeActiveRuntime()
             runtime?.stop()
             server.stop()
@@ -109,7 +106,7 @@ struct WiredMonitorServer {
 
         if virtualConfig.enabled {
             guard let createdDisplay = VirtualDisplay.create(configuration: virtualConfig) else {
-                print("[主] 虚拟显示创建失败；如需临时回到主屏镜像，设置 WIRED_MONITOR_MIRROR_MAIN=1")
+                print("\(ServerText.mainTag) \(ServerText.text("虚拟显示创建失败；如需临时回到主屏镜像，设置 WIRED_MONITOR_MIRROR_MAIN=1", "Virtual display creation failed. Set WIRED_MONITOR_MIRROR_MAIN=1 to temporarily mirror the main display."))")
                 return nil
             }
 
@@ -120,16 +117,16 @@ struct WiredMonitorServer {
             virtualDisplay = nil
             displayID = CGMainDisplayID()
             fallbackResolution = nil
-            print("[主] 已使用主屏镜像模式")
+            print("\(ServerText.mainTag) \(ServerText.text("已使用主屏镜像模式", "Using main-display mirror mode"))")
         }
 
         let (width, height) = displayResolution(displayID: displayID, fallback: fallbackResolution)
         guard width > 0, height > 0 else {
-            print("[主] 无法获取显示器分辨率")
+            print("\(ServerText.mainTag) \(ServerText.text("无法获取显示器分辨率", "Failed to get display resolution"))")
             return nil
         }
 
-        print("[主] 捕获显示器: \(displayID), 分辨率: \(width)x\(height), FPS: \(streamFps)")
+        print("\(ServerText.mainTag) \(ServerText.text("捕获显示器", "Capture display")): \(displayID), \(ServerText.text("分辨率", "resolution")): \(width)x\(height), FPS: \(streamFps)")
 
         let capture = ScreenCapture(displayID: displayID, fps: streamFps)
         let encoder = H264Encoder(width: width, height: height, fps: streamFps)
@@ -138,20 +135,22 @@ struct WiredMonitorServer {
         let runtime: StreamRuntime
 
         if !forceRaw && encoder.start() {
-            print("[主] \(encoder.codecName) 编码模式")
+            print("\(ServerText.mainTag) \(encoder.codecName) \(ServerText.text("编码模式", "encode mode"))")
             startH264Mode(capture: capture, encoder: encoder, server: server, width: width, height: height, fps: streamFps)
             runtime = StreamRuntime(capture: capture, encoder: encoder, cursorTracker: cursorTracker, virtualDisplay: virtualDisplay)
         } else {
             if !forceRaw && !encoder.usesDefaultCodec && ProcessInfo.processInfo.environment["WIRED_MONITOR_ALLOW_RAW_FALLBACK"] != "1" {
-                print("[主] \(encoder.codecName) 编码器启动失败，已停止；如需回退 RAW，设置 WIRED_MONITOR_ALLOW_RAW_FALLBACK=1")
+                print("\(ServerText.mainTag) \(encoder.codecName) \(ServerText.text("编码器启动失败，已停止；如需回退 RAW，设置 WIRED_MONITOR_ALLOW_RAW_FALLBACK=1", "encoder failed to start and the server stopped. Set WIRED_MONITOR_ALLOW_RAW_FALLBACK=1 to allow RAW fallback."))")
                 return nil
             }
-            print(forceRaw ? "[主] 已强制使用 RAW 模式" : "[主] H.264 编码器启动失败，使用 RAW 模式")
+            print(forceRaw
+                ? "\(ServerText.mainTag) \(ServerText.text("已强制使用 RAW 模式", "Forced RAW mode enabled"))"
+                : "\(ServerText.mainTag) \(ServerText.text("H.264 编码器启动失败，使用 RAW 模式", "H.264 encoder failed to start; using RAW mode"))")
             startRawMode(capture: capture, server: server, width: width, height: height, fps: streamFps)
             runtime = StreamRuntime(capture: capture, encoder: nil, cursorTracker: cursorTracker, virtualDisplay: virtualDisplay)
         }
 
-        print("[主] 启动屏幕捕获...")
+        print("\(ServerText.mainTag) \(ServerText.text("启动屏幕捕获...", "Starting screen capture..."))")
         await capture.start()
         cursorTracker?.start()
         return runtime
@@ -159,12 +158,12 @@ struct WiredMonitorServer {
 
     private static func makeCursorTracker(displayID: CGDirectDisplayID, width: Int, height: Int, server: FrameServer) -> CursorTracker? {
         if captureIncludesCursor() {
-            print("[鼠标] 已使用视频帧内 cursor")
+            print("\(ServerText.cursorTag) \(ServerText.text("已使用视频帧内 cursor", "Using cursor embedded in video frames"))")
             return nil
         }
 
         guard envBool("WIRED_MONITOR_SEPARATE_CURSOR", defaultValue: false) else {
-            print("[鼠标] 独立 cursor 通道未启用")
+            print("\(ServerText.cursorTag) \(ServerText.text("独立 cursor 通道未启用", "Separate cursor channel is disabled"))")
             return nil
         }
 
@@ -314,7 +313,7 @@ struct WiredMonitorServer {
                         skippedForBackpressure += 1
                         let now = Date()
                         if now.timeIntervalSince(lastBackpressureReportTime) >= 1.0 {
-                            print("[编码器] 网络发送未完成，跳过编码输入: \(skippedForBackpressure)")
+                            print("\(ServerText.encoderTag) \(ServerText.text("网络发送未完成，跳过编码输入", "Network send is still pending; skipped encode inputs")): \(skippedForBackpressure)")
                             skippedForBackpressure = 0
                             lastBackpressureReportTime = now
                         }
@@ -350,7 +349,7 @@ struct WiredMonitorServer {
                 let elapsed = now.timeIntervalSince(lastReportTime)
                 let fps = Double(frameCount - lastReportFrame) / elapsed
                 let sizeKB = Double(nalData.count) / 1024.0
-                print("[统计] FPS: \(String(format: "%.1f", fps)), 帧大小: \(String(format: "%.1f", sizeKB)) KB, 关键帧: \(isKeyFrame), 客户端: \(server.clientCount)")
+                print("\(ServerText.statsTag) FPS: \(String(format: "%.1f", fps)), \(ServerText.text("帧大小", "frame size")): \(String(format: "%.1f", sizeKB)) KB, \(ServerText.text("关键帧", "key frame")): \(isKeyFrame), \(ServerText.text("客户端", "clients")): \(server.clientCount)")
                 lastReportTime = now
                 lastReportFrame = frameCount
             }
@@ -374,10 +373,10 @@ struct WiredMonitorServer {
                 if hashDiagnosticsEnabled {
                     let hash = pixelBufferSampleHash(pixelBuffer)
                     let changed = hash != lastInputHash
-                    print("[捕获统计] 输入 FPS: \(String(format: "%.1f", fps)), hash: \(String(hash, radix: 16)), changed: \(changed), 客户端: \(server.clientCount)")
+                    print("\(ServerText.captureStatsTag) \(ServerText.text("输入 FPS", "input FPS")): \(String(format: "%.1f", fps)), hash: \(String(hash, radix: 16)), changed: \(changed), \(ServerText.text("客户端", "clients")): \(server.clientCount)")
                     lastInputHash = hash
                 } else {
-                    print("[捕获统计] 输入 FPS: \(String(format: "%.1f", fps)), 客户端: \(server.clientCount)")
+                    print("\(ServerText.captureStatsTag) \(ServerText.text("输入 FPS", "input FPS")): \(String(format: "%.1f", fps)), \(ServerText.text("客户端", "clients")): \(server.clientCount)")
                 }
                 lastInputReportTime = now
                 lastInputReportFrame = inputFrameCount
@@ -410,10 +409,10 @@ struct WiredMonitorServer {
                 if hashDiagnosticsEnabled {
                     let hash = pixelBufferSampleHash(pixelBuffer)
                     let changed = hash != lastInputHash
-                    print("[捕获统计-RAW] 输入 FPS: \(String(format: "%.1f", fps)), hash: \(String(hash, radix: 16)), changed: \(changed), 客户端: \(server.clientCount)")
+                    print("\(ServerText.rawCaptureStatsTag) \(ServerText.text("输入 FPS", "input FPS")): \(String(format: "%.1f", fps)), hash: \(String(hash, radix: 16)), changed: \(changed), \(ServerText.text("客户端", "clients")): \(server.clientCount)")
                     lastInputHash = hash
                 } else {
-                    print("[捕获统计-RAW] 输入 FPS: \(String(format: "%.1f", fps)), 客户端: \(server.clientCount)")
+                    print("\(ServerText.rawCaptureStatsTag) \(ServerText.text("输入 FPS", "input FPS")): \(String(format: "%.1f", fps)), \(ServerText.text("客户端", "clients")): \(server.clientCount)")
                 }
                 lastInputReportTime = now
                 lastInputReportFrame = inputFrameCount
@@ -461,7 +460,7 @@ struct WiredMonitorServer {
                 let elapsed = now.timeIntervalSince(lastReportTime)
                 let fps = Double(frameCount - lastReportFrame) / elapsed
                 let sizeMB = Double(data.count) / (1024.0 * 1024.0)
-                print("[统计-RAW] FPS: \(String(format: "%.1f", fps)), 帧大小: \(String(format: "%.1f", sizeMB)) MB, 客户端: \(server.clientCount)")
+                print("\(ServerText.rawStatsTag) FPS: \(String(format: "%.1f", fps)), \(ServerText.text("帧大小", "frame size")): \(String(format: "%.1f", sizeMB)) MB, \(ServerText.text("客户端", "clients")): \(server.clientCount)")
                 lastReportTime = now
                 lastReportFrame = frameCount
             }

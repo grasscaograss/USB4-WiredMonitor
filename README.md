@@ -123,8 +123,8 @@ Thunderbolt Bridge IP manually.
 
 ## Language
 
-The Windows UI follows the operating system language by default. It currently
-supports English and Simplified Chinese.
+The Windows UI and Mac server logs follow the operating system language by
+default. They currently support English and Simplified Chinese.
 
 You can switch language in the toolbar, or force a language before launch:
 
@@ -174,6 +174,7 @@ Set these environment variables before starting the corresponding process.
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `WIRED_MONITOR_LANG` | System language | `en-US` or `zh-CN`; controls Mac server log language. |
 | `WIRED_MONITOR_FPS` | Client refresh rate, capped at 60 | Stream FPS, max 120. |
 | `WIRED_MONITOR_BITRATE` | Auto | Video bitrate in bits per second. |
 | `WIRED_MONITOR_CODEC` | `h264` | `h264` or `hevc`. |

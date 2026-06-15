@@ -6,17 +6,17 @@ enum DisplayDiagnostics {
     static func printOnlineDisplays(prefix: String) {
         var count: UInt32 = 0
         guard CGGetOnlineDisplayList(0, nil, &count) == .success else {
-            print("\(prefix) 无法获取在线显示器数量")
+            print("\(prefix) \(ServerText.text("无法获取在线显示器数量", "failed to get online display count"))")
             return
         }
 
         var displays = Array(repeating: CGDirectDisplayID(), count: Int(count))
         guard CGGetOnlineDisplayList(count, &displays, &count) == .success else {
-            print("\(prefix) 无法获取在线显示器列表")
+            print("\(prefix) \(ServerText.text("无法获取在线显示器列表", "failed to get online display list"))")
             return
         }
 
-        print("\(prefix) 在线显示器 \(count) 个:")
+        print("\(prefix) \(ServerText.text("在线显示器", "online displays")) \(count):")
         for displayID in displays.prefix(Int(count)) {
             let bounds = CGDisplayBounds(displayID)
             let mode = CGDisplayCopyDisplayMode(displayID)
@@ -34,7 +34,7 @@ enum DisplayDiagnostics {
     }
 
     static func printShareableDisplays(_ displays: [SCDisplay], target displayID: CGDirectDisplayID, prefix: String) {
-        print("\(prefix) ScreenCaptureKit 显示器 \(displays.count) 个, target=\(displayID):")
+        print("\(prefix) ScreenCaptureKit \(ServerText.text("显示器", "displays")) \(displays.count), target=\(displayID):")
         for display in displays {
             print("\(prefix) - sckID=\(display.displayID), size=\(display.width)x\(display.height), target=\(display.displayID == displayID)")
         }

@@ -116,7 +116,7 @@ final class VirtualDisplay {
 
     static func create(configuration: VirtualDisplayConfiguration) -> VirtualDisplay? {
         guard WMVirtualDisplayIsAvailable() else {
-            print("[虚拟显示] 当前 macOS 不提供 CGVirtualDisplay 运行时类")
+            print("\(ServerText.virtualDisplayTag) \(ServerText.text("当前 macOS 不提供 CGVirtualDisplay 运行时类", "CGVirtualDisplay runtime classes are not available on this macOS version"))")
             return nil
         }
 
@@ -134,21 +134,21 @@ final class VirtualDisplay {
             var error: NSError?
             guard let handle = WMVirtualDisplayMake(options, &error) else {
                 if let error {
-                    print("[虚拟显示] 创建失败: \(error.localizedDescription)")
+                    print("\(ServerText.virtualDisplayTag) \(ServerText.text("创建失败", "creation failed")): \(error.localizedDescription)")
                 } else {
-                    print("[虚拟显示] 创建失败: 未知错误")
+                    print("\(ServerText.virtualDisplayTag) \(ServerText.text("创建失败: 未知错误", "creation failed: unknown error"))")
                 }
                 return nil
             }
 
             let display = VirtualDisplay(handle: handle)
             guard waitUntilOnline(displayID: display.displayID) else {
-                print("[虚拟显示] displayID=\(display.displayID) 未出现在在线显示器列表中")
-                DisplayDiagnostics.printOnlineDisplays(prefix: "[虚拟显示]")
+                print("\(ServerText.virtualDisplayTag) displayID=\(display.displayID) \(ServerText.text("未出现在在线显示器列表中", "did not appear in the online display list"))")
+                DisplayDiagnostics.printOnlineDisplays(prefix: ServerText.virtualDisplayTag)
                 return nil
             }
-            print("[虚拟显示] 已创建 \(configuration.width)x\(configuration.height) backing pixels, logical \(configuration.logicalWidth)x\(configuration.logicalHeight) @ \(configuration.refreshRate)Hz, displayID=\(display.displayID), HiDPI=\(configuration.hiDPI), scale=\(configuration.backingScale)x")
-            DisplayDiagnostics.printOnlineDisplays(prefix: "[虚拟显示]")
+            print("\(ServerText.virtualDisplayTag) \(ServerText.text("已创建", "created")) \(configuration.width)x\(configuration.height) backing pixels, logical \(configuration.logicalWidth)x\(configuration.logicalHeight) @ \(configuration.refreshRate)Hz, displayID=\(display.displayID), HiDPI=\(configuration.hiDPI), scale=\(configuration.backingScale)x")
+            DisplayDiagnostics.printOnlineDisplays(prefix: ServerText.virtualDisplayTag)
             return display
         }
     }
